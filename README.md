@@ -4,6 +4,11 @@
 
 Docker-Assistant 是一个把「镜像代理加速」与「容器镜像更新」合并到单个容器的自托管工具。它既可作为 Docker 镜像拉取加速节点（支持 Docker Hub / GHCR / GCR / Quay / MCR / Elastic / NVCR 等多 registry），又能自动检测本地容器是否有新镜像并一键更新，全部功能通过一个 Web 后台统一管理。
 
+- **项目名称**：Docker-Assistant
+- **当前版本**：v1.0.0
+- **运行环境**：Python 3.12.10（Docker 镜像内已内置）
+- **授权协议**：GNU General Public License v3.0（GPL-3.0）
+
 ---
 
 ## 目录
@@ -28,7 +33,7 @@ Docker-Assistant 是一个把「镜像代理加速」与「容器镜像更新」
 - **在线检测**：只探测 `/v2/`，快速判断节点可达性；离线自动熔断、冷却后自动恢复
 - **节点粘性**：镜像级 / 心跳级粘性窗口，减少节点切换
 - **流式转发**：1MB 分块流式返回，支持大镜像续传场景
-- **智能重定向跟随**：自动跟随 3xx，兼容 1ms / SparkCR 等会重定向到 CDN 的节点
+- **智能重定向跟随**：自动跟随 3xx，兼容会重定向到 CDN 的节点
 - **访问控制**：IP 白名单、镜像白/黑名单正则
 - **镜像搜索**：Web 后台直接搜索 Docker Hub，复制拉取命令
 
@@ -38,7 +43,9 @@ Docker-Assistant 是一个把「镜像代理加速」与「容器镜像更新」
 - **更新策略**：`track`（跟随当前 tag）/ `latest`（固定 latest）/ `pin`（指定版本）
 - **一键更新**：拉取新镜像 + 安全重建容器（临时名创建 → 停止旧容器 → 删除 → 改名 → 启动）
 - **批量更新**：一次勾选多个容器并发更新
-- **更新源可选**：默认走内置镜像加速节点（`local`），也可添加自定义加速源
+- **智能更新源策略**：
+  - **有路由的 registry**（Docker Hub / GHCR / GCR / Quay / MCR / Elastic / NVCR）→ **优先走节点路由**（内置 `local` 加速代理）
+  - **无路由的 registry**（自定义 / 私有）→ **直接直连**
 - **检测前置条件**：可配置为「等待镜像加速就绪后再检测」，避免刚启动时误判
 - **镜像管理**：列出本地镜像、删除镜像（带占用提示）、清理悬空镜像
 - **自动更新**（可选）：发现新版本时自动拉取并重建
@@ -54,6 +61,7 @@ Docker-Assistant 是一个把「镜像代理加速」与「容器镜像更新」
 - **单容器、单端口、单配置文件**，无外部依赖（SQLite 内嵌）
 - **首次启动自动生成 `config/config.yaml`**，无需手动准备任何示例文件
 - **Web 管理后台**：镜像加速 / 容器列表 / 镜像管理 / 运行日志 四大标签页
+- **顶栏实时统计**：拉取状态 + 容器状态（需更新 / 错误 / 悬空镜像），点击可跳转
 - **配置在线编辑**：修改后自动备份旧配置并立即重载
 - **任务进度浮层**：节点拉取 / 在线检测 / 速度测试 / 容器检测 / 镜像更新，所有任务统一展示
 
@@ -80,7 +88,7 @@ mkdir -p /opt/docker-assistant && cd /opt/docker-assistant
     └── ...
 ```
 
-> **无需提前准备 `config.yaml`**：首次启动时程序会自动生成一份带有完整注释的默认配置。
+> **无需提前准备 `config.yaml`**：首次启动时程序会自动生成一份带完整注释的默认配置。
 
 ### 2. 启动
 
@@ -113,7 +121,17 @@ services:
   docker-assistant:
     build:
       context: .
-    image: docker-assistant:1.0.0
+      args:
+        # 基础镜像。默认走国内公共代理（DaoCloud）。
+        #
+        # 换成其他可用地址（按需替换）：
+        #   - DaoCloud 代理：       docker.m.daocloud.io/library/python:3.12.10-slim
+        #   - 1ms 代理：            docker.1ms.run/library/python:3.12.10-slim
+        #   - 1Panel 代理：         docker.1panel.live/library/python:3.12.10-slim
+        #   - 阿里云个人加速器：     <your-id>.mirror.aliyuncs.com/library/python:3.12.10-slim
+        #   - 直连官方 Docker Hub： python:3.12.10-slim
+        BASE_IMAGE: docker.m.daocloud.io/library/python:3.12.10-slim
+    image: docker-assistant:latest
     container_name: docker-assistant
     restart: unless-stopped
     ports:
@@ -451,6 +469,9 @@ docker pull <host>:8000/library/hello-world
 ### 4. 容器更新源（默认已配置）
 
 - 默认 `updater.mirrors = ["local"]`，即检测时走内置镜像加速
+- **检测/拉取策略**：
+  - **有路由的 registry**（Docker Hub / GHCR / GCR / Quay / MCR / Elastic / NVCR）→ 走节点路由
+  - **无路由的 registry**（自定义 / 私有）→ 直连
 - 若需添加自定义源：在「配置文件 → 容器更新」的「更新源列表」中追加 URL
 - 检测请求按顺序尝试；拉取时 `"local"` 会自动跳过（Docker daemon 无法回连容器内部）
 
@@ -475,9 +496,21 @@ environment:
   - TZ=Asia/Shanghai # 改为你的时区
 ```
 
+### 8. 构建时基础镜像（按需）
+
+若默认的 DaoCloud 代理不可用，编辑 `docker-compose.yml`：
+
+```yaml
+build:
+  args:
+    BASE_IMAGE: docker.1ms.run/library/python:3.12.10-slim
+```
+
+然后重新构建。
+
 ---
 
-## 五、注意事项
+## 五、需要注意事项
 
 ### 1. Docker Socket 权限
 
@@ -511,7 +544,7 @@ environment:
 
 ### 4. 无 `.env` 文件也能正常工作
 
-本项目**没有 `.env.example`，也不依赖 `.env` 文件**。所有容器级参数（端口、时区、pip 源）都硬编码在 `docker-compose.yml` 里，需要修改时直接编辑该文件。
+本项目**没有 `.env.example`，也不依赖 `.env` 文件**。所有容器级参数（端口、时区、基础镜像）都硬编码在 `docker-compose.yml` 里，需要修改时直接编辑该文件。
 
 应用级配置（代理节点、容器更新策略、日志等）统一放在 `config/config.yaml`，首次启动自动生成，之后通过 Web 后台或直接编辑修改。
 
@@ -522,41 +555,48 @@ environment:
 
 升级或迁移时，保留 `config/` 与 `data/` 目录即可。
 
-### 6. 构建时的网络与 pip 源策略
+### 6. 构建时的网络与镜像源策略
 
-Dockerfile 内置了「快速探测 + 熔断 + 阿里源回退」策略，无需任何手动配置：
+Dockerfile 内置了「**先镜像源，失败回退官方源**」的多层策略，无需任何手动配置：
+
+#### 基础镜像
+
+- 通过 `docker-compose.yml` 的 `build.args.BASE_IMAGE` 控制
+- **默认走 DaoCloud 公共代理**（`docker.m.daocloud.io/library/python:3.12.10-slim`）
+- 可改为 1ms / 1Panel / 阿里云个人加速器 / 直连官方
 
 #### apt 源
 
-构建阶段自动把 Debian 源替换为阿里云镜像（`mirrors.aliyun.com`），大幅加速 `apt-get install`。
+1. **默认切换阿里源**：`deb.debian.org` → `mirrors.aliyun.com`
+2. **探测阿里源可达性**：5 秒 HTTP 探测
+3. **不可达回滚官方源**：`mirrors.aliyun.com` → `deb.debian.org`
 
 #### pip 源
 
-1. **快速探测**：用 `curl` 以 5 秒连接超时探测官方 PyPI 是否可达
-2. **可达 → 直连**：直接走 `pypi.org`
-3. **不可达 → 熔断**：写入熔断标记，后续所有 pip 安装**跳过直连**，直接用阿里源
-4. **直连仍失败 → 熔断**：即使探测通过，若 pip 安装仍失败，同样熔断后回退阿里源
+1. **默认走阿里源**：`-i https://mirrors.aliyun.com/pypi/simple/`
+2. **阿里源失败熔断**：写入标记文件，后续所有 pip 安装跳过阿里源
+3. **官方 PyPI 回退**：走 `pypi.org`
 
-回退源固定为：`https://mirrors.aliyun.com/pypi/simple/`
-
-**预期构建日志**（网络不通时）：
+**预期构建日志**（国内常见）：
 
 ```
->>> [pip] 官方 PyPI 不可达，直接使用阿里源
->>> [pip] 直连已熔断，跳过直连
->>> [pip] 使用阿里源: https://mirrors.aliyun.com/pypi/simple/
->>> [pip] 本次构建最终状态：熔断已触发，使用阿里源
+>>> [apt] 使用阿里源
+>>> [pip] 尝试阿里源
+>>> [pip] 阿里源成功
+>>> [pip] 尝试阿里源
+>>> [pip] 阿里源成功
+>>> [pip] 最终状态：使用阿里源
 ```
 
-**预期构建日志**（网络通畅时）：
+**预期构建日志**（阿里源不可用，罕见）：
 
 ```
->>> [pip] 官方 PyPI 可达，尝试直连
->>> [pip] 直连成功
->>> [pip] 本次构建最终状态：全程直连成功
+>>> [apt] 阿里源不可达，回退官方 Debian 源
+>>> [pip] 尝试阿里源
+>>> [pip] 阿里源失败，切换官方 PyPI
+>>> [pip] 已切换官方 PyPI
+>>> [pip] 最终状态：使用官方 PyPI
 ```
-
-无需任何手动干预，`docker compose build --no-cache` 即可。
 
 ### 7. 反向代理场景的客户端 IP
 
@@ -719,9 +759,36 @@ services:
 docker compose up -d
 ```
 
-pip 源策略已在 Dockerfile 中内置（直连优先 + 熔断 + 阿里源回退），无需任何配置。
+### Q15：构建时卡在拉基础镜像或 pip / apt？
 
-### Q15：`config.yaml` 删了会怎样？
+按以下顺序排查：
+
+1. **基础镜像拉不下来**（`FROM` 阶段报错）：
+   - 检查 `docker-compose.yml` 的 `build.args.BASE_IMAGE` 是否可访问
+   - 换一个代理，如 `docker.1ms.run/library/python:3.12.10-slim`
+   - 若都不可用，改为 `python:3.12.10-slim` 直连 Docker Hub
+
+2. **apt / pip 阶段卡住**：
+   - Dockerfile 已内置「先阿里源，失败回滚官方」策略，理论上无需手动干预
+   - 若阿里源本身不可用，会自动回滚官方源
+   - 检查构建日志中的 `>>> [apt] ...` / `>>> [pip] ...` 输出
+
+3. **宿主机 daemon.json 里的镜像加速器失效**（常见于免费第三方源）：
+   - 编辑 `/etc/docker/daemon.json`，删除失效的加速器
+   - 换为可用源，例如：
+
+     ```json
+     {
+       "registry-mirrors": [
+         "https://docker.1ms.run",
+         "https://docker.m.daocloud.io"
+       ]
+     }
+     ```
+
+   - `sudo systemctl daemon-reload && sudo systemctl restart docker`
+
+### Q16：`config.yaml` 删了会怎样？
 
 下次启动会重新生成一份**默认配置**（`admin / change_me`）。如果你的自定义配置较多，**先备份再删除**。
 
@@ -729,4 +796,33 @@ pip 源策略已在 Dockerfile 中内置（直连优先 + 熔断 + 阿里源回�
 
 ## 七、授权协议
 
-## 本项目基于 **GNU General Public License v3.0（GPL-3.0）** 发布。
+本项目基于 **GNU General Public License v3.0（GPL-3.0）** 发布。
+
+```
+Copyright (C) 2026 Docker-Assistant Contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+- 协议全文：<https://www.gnu.org/licenses/gpl-3.0.html>
+- 中文参考：<https://www.gnu.org/licenses/gpl-3.0.zh-cn.html>
+
+**这意味着**：
+
+- 你可以自由使用、修改、分发本软件
+- 分发修改版时**必须开源**，并以相同协议授权
+- 必须保留原作者版权声明
+- 作者不对使用本软件产生的任何后果负责
+
+---

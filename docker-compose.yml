@@ -12,7 +12,7 @@ services:
         #   - 阿里云个人加速器：     <your-id>.mirror.aliyuncs.com/library/python:3.12.10-slim
         #   - 直连官方 Docker Hub： python:3.12.10-slim
         BASE_IMAGE: docker.m.daocloud.io/library/python:3.12.10-slim
-    image: docker-assistant:latest
+    image: docker.cnb.cool/1983shake/docker-assistant:latest
     container_name: docker-assistant
     restart: unless-stopped
     ports:
