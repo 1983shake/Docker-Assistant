@@ -1,0 +1,2355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f4c81">
+    <title>{{ app_name }} - {{ app_tagline }}</title>
+
+    <link rel="preconnect" href="https://cdn.tailwindcss.com">
+    <link rel="preconnect" href="https://unpkg.com">
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family:
+                -apple-system, BlinkMacSystemFont, "Segoe UI",
+                "PingFang SC", "Hiragino Sans GB",
+                "Microsoft YaHei UI", "Microsoft YaHei",
+                "Source Han Sans SC", "Noto Sans CJK SC",
+                "WenQuanYi Micro Hei", "Helvetica Neue", Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            letter-spacing: 0.01em;
+            color: #1f2937;
+            background: #f9fafb;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            text-rendering: optimizeLegibility;
+            font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+        }
+
+        .gradient-bg {
+            background: linear-gradient(135deg, #0f4c81 0%, #22d3ee 100%);
+        }
+
+        #app {
+            visibility: hidden;
+        }
+
+        #app.app-ready {
+            visibility: visible;
+        }
+
+        #boot-skeleton {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #0f4c81 0%, #22d3ee 100%);
+            color: #fff;
+            font-family: inherit;
+            font-size: 14.5px;
+            letter-spacing: 0.03em;
+            z-index: 9999;
+            transition: opacity .3s ease;
+        }
+
+        #boot-skeleton.hide {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #boot-skeleton .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255, 255, 255, .3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+            margin-right: 12px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .line-clamp-2 {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        /* ---------- 表格 ---------- */
+        .node-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        .node-table th,
+        .node-table td {
+            padding: 9px 10px;
+            text-align: left;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            vertical-align: middle;
+            font-size: 12.5px;
+            line-height: 1.5;
+        }
+
+        .node-table thead th {
+            font-size: 11.5px;
+            font-weight: 600;
+            color: #6b7280;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            background: #f9fafb;
+            border-bottom: 1px solid #e5e7eb;
+            cursor: pointer;
+            user-select: none;
+            padding-top: 10px;
+            padding-bottom: 10px;
+        }
+
+        .node-table thead th.no-sort {
+            cursor: default;
+        }
+
+        .node-table tbody tr {
+            border-bottom: 1px solid #f3f4f6;
+            transition: background .15s;
+        }
+
+        .node-table tbody tr:hover {
+            background: #f9fafb;
+        }
+
+        .node-table tbody tr:last-child {
+            border-bottom: 0;
+        }
+
+        /* 等宽数字列：对齐更整齐 */
+        .node-table td.font-mono,
+        .mono-num {
+            font-family:
+                "JetBrains Mono", "SF Mono", "Menlo", "Consolas",
+                "Roboto Mono", "Liberation Mono", "Courier New", monospace;
+            font-variant-numeric: tabular-nums;
+            font-feature-settings: "tnum" 1;
+            letter-spacing: -0.01em;
+        }
+
+        /* 通用等宽字体 */
+        code,
+        pre,
+        .mono {
+            font-family:
+                "JetBrains Mono", "SF Mono", "Menlo", "Consolas",
+                "Roboto Mono", "Liberation Mono", "Courier New", monospace;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.01em;
+        }
+
+        /* 状态徽章微调 */
+        .status-badge {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            font-family:
+                "JetBrains Mono", "SF Mono", "Menlo", "Consolas",
+                ui-monospace, monospace;
+        }
+
+        /* 标题字重与字间距 */
+        h1,
+        h2,
+        h3 {
+            letter-spacing: -0.01em;
+            font-weight: 700;
+        }
+
+        /* 支持 1024 最小宽度，横向滚动兜底 */
+        .app-shell {
+            min-width: 1024px;
+        }
+
+        /* 顶部细进度条 */
+        #top-progress {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            z-index: 9998;
+            background: transparent;
+            pointer-events: none;
+        }
+
+        #top-progress .bar {
+            height: 100%;
+            width: 0;
+            background: linear-gradient(90deg, #22d3ee, #0f4c81);
+            transition: width .3s ease;
+            box-shadow: 0 0 8px rgba(34, 211, 238, .8);
+        }
+
+        /* 表格里的按钮图标 */
+        .node-table button i {
+            font-size: 12px;
+        }
+
+        /* 输入框字体微调 */
+        input,
+        select,
+        textarea,
+        button {
+            font-family: inherit;
+        }
+
+        /* 滚动条美化（可选，不影响布局） */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #d1d5db;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #9ca3af;
+        }
+    </style>
+
+    <script src="https://cdn.tailwindcss.com/3.4.1"></script>
+    <script defer src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        onload="this.onload=null;this.rel='stylesheet'">
+    <noscript>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    </noscript>
+</head>
+
+<body>
+
+    <div id="top-progress">
+        <div class="bar"></div>
+    </div>
+
+    <div id="boot-skeleton">
+        <div class="spinner"></div>
+        <span>正在加载 DockerMirrorFlow…</span>
+    </div>
+
+    <div id="app">
+        <!-- Header -->
+        <header class="gradient-bg text-white">
+            <div class="container mx-auto px-6 py-4">
+                <div class="flex justify-between items-center flex-wrap gap-3">
+                    <div class="flex items-center space-x-3">
+                        <i class="fa-solid fa-water text-3xl"></i>
+                        <div>
+                            <h1 class="text-xl font-bold tracking-tight">{{ app_name }}</h1>
+                            <p class="text-xs opacity-80 tracking-wide mt-0.5">{{ app_tagline }}</p>
+                        </div>
+                    </div>
+                    <a href="/updater" style="text-decoration:none">
+                        <button class="text-xs bg-white/15 text-white px-2.5 py-1 rounded hover:bg-white/25 mr-3">
+                            <i class="fas fa-cubes mr-1"></i> 容器更新器
+                        </button>
+                    </a>
+                    <div class="text-sm opacity-95 text-right leading-relaxed">
+                        <span @click="showPullsModal = true"
+                            class="cursor-pointer hover:underline font-bold tracking-wide">
+                            {{ pull_stats.total }} 次拉取
+                        </span>
+                        <span class="text-xs opacity-80 ml-1">
+                            (成功 {{ pull_stats.success }} / 失败 {{ pull_stats.failed }} / 取消 {{ pull_stats.cancelled }})
+                        </span>
+                        <span class="ml-3 text-xs opacity-90 mono-num">
+                            <i class="fas fa-arrow-down mr-1"></i>
+                            {{ "%.2f"|format(total_download / 1024 / 1024) }} MB
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="container mx-auto px-5 py-5">
+            <div class="app-shell">
+                <div class="flex flex-col lg:flex-row gap-5">
+
+                    <!-- 左侧：节点列表 -->
+                    <div class="flex-1 min-w-0 bg-white rounded-xl shadow-md p-5">
+                        <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+                            <h3 class="text-lg font-bold text-gray-800 tracking-tight">加速节点</h3>
+                            <div class="flex flex-wrap gap-1.5">
+                                <button @click="openConfigModal"
+                                    class="text-xs bg-gray-50 text-gray-700 px-2.5 py-1 rounded hover:bg-gray-100 border border-gray-200">
+                                    <i class="fas fa-cog mr-1"></i> 配置文件
+                                </button>
+                                <button @click="exportNodes"
+                                    class="text-xs bg-blue-50 text-blue-600 px-2.5 py-1 rounded hover:bg-blue-100">
+                                    <i class="fas fa-file-export mr-1"></i> 导出
+                                </button>
+                                <button @click="$refs.fileInput.click()"
+                                    class="text-xs bg-teal-50 text-teal-600 px-2.5 py-1 rounded hover:bg-teal-100">
+                                    <i class="fas fa-file-import mr-1"></i> 导入
+                                </button>
+                                <input type="file" ref="fileInput" @change="importNodes" class="hidden" accept=".json">
+                                <button @click="fetchNodes" :disabled="fetching"
+                                    class="text-xs bg-purple-50 text-purple-600 px-2.5 py-1 rounded hover:bg-purple-100 disabled:opacity-60">
+                                    <i class="fas fa-cloud-download-alt mr-1" :class="{'fa-spin': fetching}"></i> 获取免费节点
+                                </button>
+                                <button @click="runHealthCheck" :disabled="testing || selectedIds.length === 0"
+                                    :title="selectedIds.length === 0 ? '请先勾选要检测的节点' : '在线检测选中节点'"
+                                    class="text-xs bg-emerald-50 text-emerald-600 px-2.5 py-1 rounded hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <i class="fas fa-heartbeat mr-1"></i> 在线检测
+                                    <span v-if="selectedIds.length > 0" class="ml-1 mono-num">([[ selectedIds.length
+                                        ]])</span>
+                                </button>
+                                <button @click="runSpeedTest" :disabled="testing || selectedIds.length === 0"
+                                    :title="selectedIds.length === 0 ? '请先勾选要测试的节点' : '速度测试选中节点'"
+                                    class="text-xs bg-blue-50 text-blue-600 px-2.5 py-1 rounded hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <i class="fas fa-tachometer-alt mr-1"></i> 速度测试
+                                    <span v-if="selectedIds.length > 0" class="ml-1 mono-num">([[ selectedIds.length
+                                        ]])</span>
+                                </button>
+                                <button @click="openAddModal"
+                                    class="text-xs bg-green-50 text-green-600 px-2.5 py-1 rounded hover:bg-green-100">
+                                    <i class="fas fa-plus mr-1"></i> 添加节点
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 工具栏 -->
+                        <div class="flex gap-2 items-center mb-3 flex-wrap">
+                            <div class="inline-flex p-1 bg-gray-50 border border-gray-200 rounded-lg gap-1 flex-wrap">
+                                <button v-for="tab in tabs" :key="tab.value"
+                                    @click="currentTab = tab.value; currentPage = 1"
+                                    :class="currentTab === tab.value ? 'bg-white shadow-sm text-gray-900 font-semibold' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100 font-medium'"
+                                    class="px-2.5 py-1 rounded-md text-xs transition-all duration-150 tracking-wide">
+                                    [[ tab.label ]]
+                                </button>
+                            </div>
+                            <div class="relative flex-1 min-w-[180px] max-w-[280px] ml-auto">
+                                <i
+                                    class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs"></i>
+                                <input type="text" v-model="nodeSearchQuery" placeholder="搜索名称、URL 或标签…"
+                                    class="w-full py-1.5 pl-8 pr-3 border border-gray-200 rounded-lg bg-white text-gray-700 text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all placeholder:text-gray-400 shadow-sm">
+                            </div>
+                        </div>
+
+                        <!-- 批量操作栏 -->
+                        <div v-if="selectedIds.length > 0"
+                            class="mb-3 flex items-center gap-2 text-xs bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                            <span class="text-blue-700 font-medium">已选 <span class="mono-num">[[ selectedIds.length
+                                    ]]</span> 个节点</span>
+                            <button @click="batchDisable"
+                                class="bg-red-500 text-white px-2.5 py-1 rounded text-xs hover:bg-red-600">批量禁用</button>
+                            <button @click="batchEnable"
+                                class="bg-green-500 text-white px-2.5 py-1 rounded text-xs hover:bg-green-600">批量启用</button>
+                            <button @click="selectedIds = []"
+                                class="text-blue-600 underline text-xs ml-auto">清除选择</button>
+                        </div>
+                        <div v-else
+                            class="mb-3 flex items-center gap-2 text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-gray-500">
+                            <i class="fas fa-info-circle"></i>
+                            <span>勾选节点后，可对选中节点执行「在线检测」「速度测试」「批量禁用/启用」。</span>
+                        </div>
+
+                        <!-- 节点表格 -->
+                        <div class="w-full bg-white border border-gray-200 rounded-xl overflow-x-auto shadow-sm">
+                            <table class="node-table">
+                                <colgroup>
+                                    <col style="width: 34px">
+                                    <col style="width: 104px">
+                                    <col style="width: 138px">
+                                    <col>
+                                    <col style="width: 96px">
+                                    <col style="width: 92px">
+                                    <col style="width: 82px">
+                                    <col style="width: 118px">
+                                </colgroup>
+                                <thead>
+                                    <tr>
+                                        <th class="no-sort">
+                                            <input type="checkbox" @change="selectAll"
+                                                :checked="selectedIds.length > 0 && selectedIds.length === paginatedProxies.length"
+                                                class="w-3.5 h-3.5 text-blue-600 border-gray-300 rounded cursor-pointer">
+                                        </th>
+                                        <th @click="sortBy('latency')">
+                                            状态 <i class="fas fa-sort ml-1 opacity-40"></i>
+                                        </th>
+                                        <th @click="sortBy('name')">
+                                            名称 <i class="fas fa-sort ml-1 opacity-40"></i>
+                                        </th>
+                                        <th @click="sortBy('url')">
+                                            URL <i class="fas fa-sort ml-1 opacity-40"></i>
+                                        </th>
+                                        <th @click="sortBy('registry_type')">
+                                            标签 <i class="fas fa-sort ml-1 opacity-40"></i>
+                                        </th>
+                                        <th @click="sortBy('speed')">
+                                            速度 <i class="fas fa-sort ml-1 opacity-40"></i>
+                                        </th>
+                                        <th @click="sortBy('download_bytes')">
+                                            流量 <i class="fas fa-sort ml-1 opacity-40"></i>
+                                        </th>
+                                        <th class="no-sort text-right">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="node in paginatedProxies" :key="node.id">
+                                        <td>
+                                            <input type="checkbox" :value="node.id" v-model="selectedIds"
+                                                class="w-3.5 h-3.5 text-blue-600 border-gray-300 rounded cursor-pointer">
+                                        </td>
+                                        <td>
+                                            <span v-if="testingIds.includes(node.id)"
+                                                class="status-badge inline-flex items-center gap-1 uppercase text-blue-500">
+                                                <i class="fas fa-spinner fa-spin"></i>速度测试中
+                                            </span>
+                                            <span v-else-if="node.manually_disabled"
+                                                class="status-badge inline-flex items-center gap-1 uppercase text-red-500"
+                                                :title="node.manual_disable_reason">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>手动禁用
+                                            </span>
+                                            <span v-else-if="!node.enabled || node.latency >= 9999"
+                                                class="status-badge inline-flex items-center gap-1 uppercase text-gray-500"
+                                                :title="node.failure_reason">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span>离线
+                                            </span>
+                                            <span v-else-if="node.latency >= 500"
+                                                class="status-badge inline-flex items-center gap-1 uppercase text-yellow-500">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-yellow-500"></span>缓慢
+                                                <span
+                                                    class="text-[10.5px] text-gray-400 normal-case tracking-normal">([[
+                                                    node.latency.toFixed(0) ]]ms)</span>
+                                            </span>
+                                            <span v-else
+                                                class="status-badge inline-flex items-center gap-1 uppercase text-green-500">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>在线
+                                                <span
+                                                    class="text-[10.5px] text-gray-400 normal-case tracking-normal">([[
+                                                    node.latency.toFixed(0) ]]ms)</span>
+                                            </span>
+                                        </td>
+                                        <td class="font-medium text-gray-800" :title="node.name">
+                                            [[ node.name ]]
+                                            <i v-if="node.is_custom"
+                                                class="fas fa-user-edit text-[10px] text-blue-400 ml-1"
+                                                title="自定义节点"></i>
+                                        </td>
+                                        <td class="font-mono text-gray-500" :title="node.url">
+                                            [[ node.url ]]
+                                        </td>
+                                        <td>
+                                            <div class="flex flex-wrap gap-1">
+                                                <span
+                                                    class="text-[10.5px] px-1.5 py-0.5 rounded font-semibold tracking-wide border"
+                                                    :class="{
+                                                      'text-blue-500 border-blue-200 bg-blue-50': (node.registry_type||'dockerhub') === 'dockerhub',
+                                                      'text-gray-600 border-gray-200 bg-gray-50': node.registry_type === 'ghcr',
+                                                      'text-red-500 border-red-200 bg-red-50': node.registry_type === 'quay',
+                                                      'text-yellow-600 border-yellow-200 bg-yellow-50': node.registry_type === 'gcr',
+                                                      'text-purple-500 border-purple-200 bg-purple-50': node.registry_type === 'mcr',
+                                                      'text-indigo-500 border-indigo-200 bg-indigo-50': node.registry_type === 'other'
+                                                  }">
+                                                    [[ (node.registry_type || 'dockerhub').toUpperCase() ]]
+                                                </span>
+                                                <span v-if="node.route_prefix"
+                                                    class="text-[10.5px] px-1.5 py-0.5 rounded font-semibold tracking-wide border text-teal-600 border-teal-200 bg-teal-50">
+                                                    [[ node.route_prefix ]]
+                                                </span>
+                                            </div>
+                                        </td>
+                                        <td class="font-mono" :class="speedColor(node.speed)">
+                                            [[ formatSpeed(node.speed) ]]
+                                        </td>
+                                        <td class="font-mono text-gray-600">
+                                            [[ formatBytes(node.download_bytes) ]]
+                                        </td>
+                                        <td class="text-right whitespace-nowrap">
+                                            <button @click="showHelp(node)"
+                                                class="text-gray-400 hover:text-blue-600 mr-1.5" title="使用说明">
+                                                <i class="fas fa-terminal"></i>
+                                            </button>
+                                            <button @click="loadHealthLogs(node.id)"
+                                                class="text-gray-400 hover:text-purple-600 mr-1.5" title="在线日志">
+                                                <i class="fas fa-heartbeat"></i>
+                                            </button>
+                                            <button @click="openEditModal(node)"
+                                                class="text-gray-400 hover:text-blue-600 mr-1.5" title="编辑">
+                                                <i class="fas fa-edit"></i>
+                                            </button>
+                                            <button v-if="!node.manually_disabled" @click="disableNode(node)"
+                                                class="text-gray-400 hover:text-orange-600 mr-1.5" title="手动禁用">
+                                                <i class="fas fa-pause"></i>
+                                            </button>
+                                            <button v-else @click="enableNode(node)"
+                                                class="text-orange-500 hover:text-green-600 mr-1.5" title="启用">
+                                                <i class="fas fa-play"></i>
+                                            </button>
+                                            <button @click="deleteNode(node.id)"
+                                                class="text-gray-400 hover:text-red-600" title="删除">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    <tr v-if="paginatedProxies.length === 0">
+                                        <td colspan="8" class="text-center text-gray-400 py-8">
+                                            <span v-if="initialLoading">
+                                                <i class="fas fa-spinner fa-spin mr-2"></i>正在加载节点数据…
+                                            </span>
+                                            <span v-else>
+                                                暂无节点，请点击「获取免费节点」或「添加节点」
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 分页 -->
+                        <div class="flex justify-between items-center mt-3 flex-wrap gap-2">
+                            <span class="text-xs text-gray-500">
+                                共 <span class="mono-num">[[ filteredProxies.length ]]</span> 个节点，
+                                第 <span class="mono-num">[[ currentPage ]]</span>/<span class="mono-num">[[ totalPages
+                                    ]]</span> 页
+                            </span>
+                            <div class="flex items-center gap-3 flex-wrap">
+                                <div class="flex items-center gap-1 text-xs text-gray-500">
+                                    <span>每页</span>
+                                    <select v-model.number="pageSize" @change="onPageSizeChange"
+                                        class="border border-gray-200 rounded px-2 py-0.5 text-xs bg-white text-gray-700 focus:outline-none focus:border-blue-500 mono-num">
+                                        <option :value="5">5</option>
+                                        <option :value="10">10</option>
+                                        <option :value="25">25</option>
+                                        <option :value="50">50</option>
+                                        <option :value="100">100</option>
+                                        <option :value="200">200</option>
+                                    </select>
+                                    <span>条</span>
+                                </div>
+                                <div class="space-x-1">
+                                    <button @click="currentPage > 1 && currentPage--" :disabled="currentPage === 1"
+                                        class="px-2.5 py-1 border rounded text-xs disabled:opacity-50 hover:bg-gray-50">上一页</button>
+                                    <button @click="currentPage < totalPages && currentPage++"
+                                        :disabled="currentPage === totalPages"
+                                        class="px-2.5 py-1 border rounded text-xs disabled:opacity-50 hover:bg-gray-50">下一页</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧栏 -->
+                    <div class="w-full lg:w-[400px] lg:shrink-0 space-y-5">
+
+                        <!-- 7 天流量趋势 -->
+                        <div class="bg-white rounded-xl shadow-md p-5">
+                            <h3 class="text-lg font-bold text-gray-800 mb-3 tracking-tight">7天流量趋势</h3>
+                            <div id="trafficChart" class="w-full" style="height: 240px;" v-show="stats.length > 0">
+                                <div class="w-full h-full flex items-center justify-center text-gray-400 text-sm">
+                                    <i class="fas fa-spinner fa-spin mr-2"></i>图表加载中…
+                                </div>
+                            </div>
+                            <div v-if="stats.length === 0" class="text-gray-400 text-center py-10 text-sm">
+                                暂无流量数据
+                            </div>
+                        </div>
+
+                        <!-- 搜索 & 拉取 Docker 镜像 -->
+                        <div class="bg-white rounded-xl shadow-md p-5">
+                            <h3 class="text-lg font-bold text-gray-800 mb-3 tracking-tight">搜索 & 拉取 Docker 镜像</h3>
+
+                            <div class="relative mb-3">
+                                <input type="text" v-model="searchQuery" @keyup.enter="search" :disabled="searching"
+                                    placeholder="搜索镜像 (例如: ubuntu, nginx)..."
+                                    class="w-full px-3 py-2 pr-11 rounded-lg text-gray-800 border border-gray-200 focus:outline-none focus:border-blue-500 text-sm disabled:opacity-60 placeholder:text-gray-400">
+                                <button @click="search" :disabled="searching"
+                                    class="absolute right-1.5 top-1/2 -translate-y-1/2 bg-blue-600 text-white px-3 py-1 rounded-md hover:bg-blue-700 transition disabled:opacity-60 text-sm">
+                                    <i class="fas" :class="searching ? 'fa-spinner fa-spin' : 'fa-search'"></i>
+                                </button>
+                            </div>
+
+                            <!-- 搜索结果 -->
+                            <div v-if="searching" class="text-center py-6 text-gray-500 text-sm">
+                                <i class="fas fa-spinner fa-spin text-xl mb-2 block"></i>
+                                正在搜索 "[[ searchQuery ]]"…
+                            </div>
+
+                            <div v-else-if="searchError" class="text-center py-6">
+                                <i class="fas fa-exclamation-triangle text-2xl text-yellow-500 mb-2 block"></i>
+                                <p class="text-gray-700 text-sm leading-relaxed">[[ searchError ]]</p>
+                                <p v-if="searchAttempts.length > 0" class="text-[11px] text-gray-400 mt-2">
+                                    尝试过的上游：
+                                    <span v-for="(a, i) in searchAttempts" :key="i" class="inline-block mr-2">
+                                        [[ a.name ]]([[ a.error ]])
+                                    </span>
+                                </p>
+                                <button @click="search"
+                                    class="mt-3 px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs">
+                                    <i class="fas fa-redo mr-1"></i> 重试
+                                </button>
+                            </div>
+
+                            <div v-else-if="searchResults.length > 0">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-xs text-gray-500">
+                                        <span class="mono-num">[[ searchResults.length ]]</span> 条
+                                        <span v-if="searchSource"> · 来源：[[ searchSource ]]</span>
+                                    </span>
+                                    <button @click="searchResults = []; searchError = ''; searchQuery = ''"
+                                        class="text-xs text-gray-500 hover:text-gray-700">
+                                        <i class="fas fa-times mr-1"></i>清除
+                                    </button>
+                                </div>
+                                <div class="max-h-[520px] overflow-y-auto space-y-2 pr-1">
+                                    <div v-for="(img, idx) in searchResults" :key="img.slug || img.repo_name || idx"
+                                        class="border border-gray-200 rounded-lg p-3 hover:shadow-md transition">
+                                        <div class="flex items-start justify-between gap-2">
+                                            <div class="min-w-0 flex-1">
+                                                <h4 class="font-bold text-sm text-blue-600 truncate"
+                                                    :title="img.repo_name">
+                                                    [[ img.repo_name ]]
+                                                </h4>
+                                                <p class="text-xs text-gray-500 mt-1 line-clamp-2 leading-relaxed">
+                                                    [[ img.short_description || '（无描述）' ]]
+                                                </p>
+                                            </div>
+                                            <div class="text-yellow-500 flex items-center space-x-0.5 shrink-0">
+                                                <i class="fas fa-star text-[10px]"></i>
+                                                <span class="text-[11px] font-bold mono-num">[[ img.star_count || 0
+                                                    ]]</span>
+                                            </div>
+                                        </div>
+                                        <div class="mt-2 pt-2 border-t border-gray-100 flex items-center gap-2">
+                                            <code
+                                                class="bg-gray-100 px-1.5 py-1 rounded text-[11px] select-all overflow-hidden text-ellipsis whitespace-nowrap flex-1 text-gray-700">
+                                                docker pull [[ host ]]/[[ (img.repo_name && img.repo_name.includes('/')) ? img.repo_name : 'library/' + (img.repo_name || '') ]]
+                                            </code>
+                                            <button @click="copyCommand(img)"
+                                                class="text-gray-400 hover:text-blue-600 shrink-0" title="复制命令">
+                                                <i class="fas fa-copy text-xs"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- 任务进度浮层 -->
+        <div v-if="progressTasks.length > 0" class="fixed bottom-5 right-5 z-40 w-80">
+            <div class="bg-white rounded-lg shadow-2xl border border-gray-200 overflow-hidden">
+                <div class="gradient-bg text-white px-4 py-2 flex justify-between items-center">
+                    <span class="text-sm font-bold flex items-center gap-2 tracking-wide">
+                        <i class="fas fa-circle-notch fa-spin"></i> 任务进行中
+                    </span>
+                    <span class="text-[10.5px] opacity-80 mono-num">[[ progressTasks.length ]] 个</span>
+                </div>
+                <div class="p-3 space-y-3 max-h-80 overflow-y-auto">
+                    <div v-for="t in progressTasks" :key="t.key">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-xs font-medium text-gray-700">[[ t.label ]]</span>
+                            <span class="text-[11px] text-gray-500 mono-num">[[ t.done ]]/[[ t.total ]]</span>
+                        </div>
+                        <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
+                            <div class="h-1.5 rounded-full transition-all duration-300"
+                                :class="t.running ? 'bg-blue-500' : 'bg-green-500'" :style="{ width: t.percent + '%' }">
+                            </div>
+                        </div>
+                        <div class="text-[11px] text-gray-400 mt-1">[[ t.message || '处理中…' ]]</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Help Modal -->
+        <div v-if="showHelpModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-6 w-full max-w-lg">
+                <h3 class="text-lg font-bold mb-3 tracking-tight">[[ helpTitle ]]</h3>
+                <p class="text-gray-600 mb-2 text-sm">使用以下命令通过此代理拉取镜像：</p>
+                <div class="bg-gray-800 text-white p-3 rounded-lg text-xs relative group">
+                    <code class="break-all">[[ helpCommand ]]</code>
+                    <button @click="copyHelpCommand"
+                        class="absolute top-2 right-2 text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <div class="mt-5 flex justify-end">
+                    <button @click="showHelpModal = false"
+                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">知道了</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pulls History Modal -->
+        <div v-if="showPullsModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-6 w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold tracking-tight">最近拉取记录</h3>
+                    <div class="flex items-center">
+                        <button @click="clearPulls"
+                            class="text-red-500 hover:text-red-700 mr-4 text-xs font-bold flex items-center">
+                            <i class="fas fa-trash mr-1"></i> 清空记录
+                        </button>
+                        <button @click="showPullsModal = false" class="text-gray-500 hover:text-gray-700">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="overflow-y-auto flex-1">
+                    <table class="w-full text-left">
+                        <thead class="bg-gray-50 sticky top-0">
+                            <tr class="text-gray-500 text-[11.5px] border-b tracking-wide">
+                                <th class="p-2.5 font-semibold">时间</th>
+                                <th class="p-2.5 font-semibold">镜像</th>
+                                <th class="p-2.5 font-semibold">标签</th>
+                                <th class="p-2.5 font-semibold">大小</th>
+                                <th class="p-2.5 font-semibold">状态</th>
+                                <th class="p-2.5 font-semibold">客户端 IP</th>
+                                <th class="p-2.5 font-semibold">节点</th>
+                                <th class="p-2.5 font-semibold">错误</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-xs">
+                            <tr v-for="pull in pullHistory" :key="pull.id" class="border-b hover:bg-gray-50">
+                                <td class="p-2.5 text-gray-500 whitespace-nowrap mono-num">
+                                    [[ new Date(pull.request_time).toLocaleString() ]]
+                                </td>
+                                <td class="p-2.5 font-medium text-blue-600">[[ pull.image ]]</td>
+                                <td class="p-2.5">[[ pull.tag ]]</td>
+                                <td class="p-2.5 font-mono text-gray-600">
+                                    [[ pull.download_bytes > 0 ? formatBytes(pull.download_bytes) : '-' ]]
+                                </td>
+                                <td class="p-2.5">
+                                    <span v-if="pull.status === 'success'"
+                                        class="inline-flex items-center text-green-600 font-medium">
+                                        <i class="fas fa-check-circle mr-1"></i>成功
+                                    </span>
+                                    <span v-else-if="pull.status === 'failed'"
+                                        class="inline-flex items-center text-red-600 font-medium">
+                                        <i class="fas fa-times-circle mr-1"></i>失败
+                                    </span>
+                                    <span v-else-if="pull.status === 'cancelled'"
+                                        class="inline-flex items-center text-yellow-600 font-medium">
+                                        <i class="fas fa-ban mr-1"></i>取消
+                                    </span>
+                                    <span v-else class="text-gray-500">[[ pull.status ]]</span>
+                                </td>
+                                <td class="p-2.5 text-gray-500 font-mono">[[ pull.client_ip ]]</td>
+                                <td class="p-2.5 text-gray-500">[[ pull.node_name || '-' ]]</td>
+                                <td class="p-2.5 text-gray-400 max-w-[200px] truncate" :title="pull.error_message">
+                                    [[ pull.error_message || '-' ]]
+                                </td>
+                            </tr>
+                            <tr v-if="pullHistory.length === 0">
+                                <td colspan="8" class="p-4 text-center text-gray-400">暂无拉取记录。</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="mt-4 flex justify-end">
+                    <button @click="showPullsModal = false"
+                        class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Health Logs Modal -->
+        <div v-if="showLogsModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-6 w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold tracking-tight">在线检测日志</h3>
+                    <button @click="showLogsModal = false" class="text-gray-500 hover:text-gray-700">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="overflow-y-auto flex-1">
+                    <table class="w-full text-left">
+                        <thead class="bg-gray-50 sticky top-0">
+                            <tr class="text-gray-500 text-[11.5px] border-b tracking-wide">
+                                <th class="p-2.5 font-semibold">时间</th>
+                                <th class="p-2.5 font-semibold">结果</th>
+                                <th class="p-2.5 font-semibold">延迟</th>
+                                <th class="p-2.5 font-semibold">错误</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-xs">
+                            <tr v-for="log in healthLogs" :key="log.id" class="border-b">
+                                <td class="p-2.5 text-gray-500 mono-num">[[ new Date(log.check_time).toLocaleString() ]]
+                                </td>
+                                <td class="p-2.5">
+                                    <span v-if="log.success" class="text-green-600 font-medium"><i
+                                            class="fas fa-check mr-1"></i>成功</span>
+                                    <span v-else class="text-red-600 font-medium"><i
+                                            class="fas fa-times mr-1"></i>失败</span>
+                                </td>
+                                <td class="p-2.5 font-mono">[[ log.latency.toFixed(0) ]]ms</td>
+                                <td class="p-2.5 text-gray-500">[[ log.error_message || '-' ]]</td>
+                            </tr>
+                            <tr v-if="healthLogs.length === 0">
+                                <td colspan="4" class="p-4 text-center text-gray-400">暂无记录</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="mt-4 flex justify-end">
+                    <button @click="showLogsModal = false"
+                        class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Add/Edit Modal -->
+        <div v-if="showAddModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
+                <h3 class="text-lg font-bold mb-4 tracking-tight">[[ isEdit ? '编辑' : '添加' ]] 代理节点</h3>
+                <form @submit.prevent="submitNode">
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium text-gray-700 mb-1 tracking-wide">名称</label>
+                        <input v-model="formNode.name" type="text" required
+                            class="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium text-gray-700 mb-1 tracking-wide">仓库类型</label>
+                        <select v-model="formNode.registry_type"
+                            class="w-full border rounded px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-blue-500">
+                            <option value="dockerhub">Docker Hub (默认)</option>
+                            <option value="ghcr">GitHub Container Registry (GHCR)</option>
+                            <option value="gcr">Google Container Registry (GCR)</option>
+                            <option value="quay">Quay.io</option>
+                            <option value="mcr">Microsoft Container Registry (MCR)</option>
+                            <option value="other">其他 / 私有仓库</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium text-gray-700 mb-1 tracking-wide">路由前缀 (可选)</label>
+                        <input v-model="formNode.route_prefix" type="text"
+                            class="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                            placeholder="例如: 'ghcr'、'ghcr.io'、'registry.k8s.io'">
+                        <p class="text-[11px] text-gray-500 mt-1 leading-relaxed">
+                            支持域名风格匹配。设置 'ghcr' 可匹配 <code class="bg-gray-100 px-1 rounded">/ghcr/...</code> 和 <code
+                                class="bg-gray-100 px-1 rounded">/ghcr.io/...</code>。
+                        </p>
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium text-gray-700 mb-1 tracking-wide">URL (例如:
+                            https://mirror.gcr.io)</label>
+                        <input v-model="formNode.url" type="url" required
+                            class="w-full border rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium text-gray-700 mb-1 tracking-wide">用户名 (可选)</label>
+                        <input v-model="formNode.username" type="text"
+                            class="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                            placeholder="私有仓库用户名">
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium text-gray-700 mb-1 tracking-wide">密码 (可选)</label>
+                        <input v-model="formNode.password" type="password"
+                            class="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                            placeholder="私有仓库密码">
+                    </div>
+                    <div class="flex justify-end space-x-2 pt-2">
+                        <button type="button" @click="showAddModal = false"
+                            class="px-4 py-1.5 text-gray-600 hover:bg-gray-100 rounded text-sm">取消</button>
+                        <button type="submit"
+                            class="px-4 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">
+                            [[ isEdit ? '保存修改' : '添加' ]]
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Config Editor Modal (结构化表单) -->
+        <div v-if="showConfigModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg w-full max-w-5xl max-h-[92vh] flex flex-col">
+                <!-- Header -->
+                <div class="px-6 py-4 border-b flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-bold tracking-tight">配置管理</h3>
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            <i class="fas fa-file-code mr-1"></i>[[ configPath || 'config/config.yaml' ]]
+                        </p>
+                    </div>
+                    <button @click="closeConfigModal" class="text-gray-500 hover:text-gray-700">
+                        <i class="fas fa-times text-lg"></i>
+                    </button>
+                </div>
+
+                <!-- Tab bar -->
+                <div class="px-6 pt-2 border-b bg-gray-50 flex flex-wrap gap-1">
+                    <button v-for="tab in configTabs" :key="tab.key" @click="activeConfigTab = tab.key" :class="activeConfigTab === tab.key
+                            ? 'bg-white text-blue-600 font-semibold border-t-2 border-l border-r border-blue-500'
+                            : 'text-gray-500 hover:text-gray-700'"
+                        class="px-3 py-2 text-xs rounded-t -mb-px transition-all">
+                        <i :class="tab.icon" class="mr-1"></i>[[ tab.label ]]
+                    </button>
+                </div>
+
+                <!-- Status -->
+                <div v-if="configStatus" :class="{
+                     'bg-green-50 border-green-200 text-green-700': configStatusType === 'success',
+                     'bg-red-50 border-red-200 text-red-700': configStatusType === 'error',
+                     'bg-blue-50 border-blue-200 text-blue-700': configStatusType === 'info'
+                 }" class="mx-6 mt-3 text-xs border rounded-lg px-3 py-2 flex items-start gap-2">
+                    <i class="fas mt-0.5" :class="{
+                       'fa-check-circle': configStatusType === 'success',
+                       'fa-exclamation-circle': configStatusType === 'error',
+                       'fa-info-circle': configStatusType === 'info'
+                   }"></i>
+                    <div class="flex-1 whitespace-pre-wrap break-all">[[ configStatus ]]</div>
+                </div>
+
+                <!-- Form body -->
+                <div class="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50">
+
+                    <!-- ===== 基础 ===== -->
+                    <template v-if="activeConfigTab === 'basic'">
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                应用信息
+                                <span class="text-[10px] text-gray-400 font-normal ml-1">(固定，不可修改)</span>
+                            </h4>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">应用名称</label>
+                                    <input :value="configForm.app.name" type="text" readonly disabled
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-gray-100 text-gray-500 cursor-not-allowed">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">标语</label>
+                                    <input :value="configForm.app.tagline" type="text" readonly disabled
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-gray-100 text-gray-500 cursor-not-allowed">
+                                </div>
+                            </div>
+                            <p class="text-[11px] text-gray-400 mt-2 leading-relaxed">
+                                <i class="fas fa-lock mr-1"></i>
+                                应用名称与标语已硬编码固定，无法通过配置文件、Web 后台或 Docker 镜像修改。
+                            </p>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">管理后台认证</h4>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">用户名</label>
+                                    <input v-model="configForm.admin.user" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">密码</label>
+                                    <input v-model="configForm.admin.pass" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                服务器
+                                <span class="text-[10px] text-amber-600 font-normal ml-1">(需重启生效)</span>
+                            </h4>
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">监听地址</label>
+                                    <input v-model="configForm.server.host" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">端口</label>
+                                    <input v-model.number="configForm.server.port" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">调试模式</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.server.debug" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">启用热重载（仅开发用）</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ===== 代理 ===== -->
+                    <template v-if="activeConfigTab === 'proxy'">
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">超时（秒）</h4>
+                            <div class="grid grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">通用</label>
+                                    <input v-model.number="configForm.proxy.timeout" type="number" step="0.1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">/v2/ 探测</label>
+                                    <input v-model.number="configForm.proxy.timeout_by_path.probe" type="number"
+                                        step="0.1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">manifests</label>
+                                    <input v-model.number="configForm.proxy.timeout_by_path.manifests" type="number"
+                                        step="0.1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">blobs</label>
+                                    <input v-model.number="configForm.proxy.timeout_by_path.blobs" type="number"
+                                        step="0.1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">流式转发 / 重定向</h4>
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">Chunk 大小（字节）</label>
+                                    <input v-model.number="configForm.proxy.stream_chunk_size" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">最大重定向层数</label>
+                                    <input v-model.number="configForm.proxy.max_redirects" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">主动跟随 3xx</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.proxy.follow_redirects" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">代理跟随 CDN</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">跟随重定向上限</label>
+                                    <input v-model.number="configForm.proxy.follow_redirects_max" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">跟随失败熔断（秒）</label>
+                                    <input v-model.number="configForm.proxy.follow_redirect_fail_cooldown" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">探测超时（秒）</label>
+                                    <input v-model.number="configForm.proxy.probe_timeout" type="number" step="0.1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">熔断策略（秒）</h4>
+                            <div class="grid grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">通用失败</label>
+                                    <input v-model.number="configForm.proxy.fail_cooldown" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">超时类</label>
+                                    <input v-model.number="configForm.proxy.timeout_fail_cooldown" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">403 类</label>
+                                    <input v-model.number="configForm.proxy.forbidden_fail_cooldown" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">5xx 类</label>
+                                    <input v-model.number="configForm.proxy.server_err_fail_cooldown" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">Blob 级失败</label>
+                                    <input v-model.number="configForm.proxy.blob_fail_cooldown" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">节点粘性</h4>
+                            <div class="grid grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">最近成功优先</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.proxy.prefer_recent_success" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">开启</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">最近成功窗口（秒）</label>
+                                    <input v-model.number="configForm.proxy.recent_success_window" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">镜像级粘性（秒）</label>
+                                    <input v-model.number="configForm.proxy.affinity_window" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">心跳粘性（秒）</label>
+                                    <input v-model.number="configForm.proxy.probe_node_window" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ===== 调度 ===== -->
+                    <template v-if="activeConfigTab === 'schedule'">
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                自动拉取
+                                <span class="text-[10px] text-amber-600 font-normal ml-1">(interval 需重启)</span>
+                            </h4>
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">启用</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.auto_fetch.enabled" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">自动拉取节点</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">拉取间隔（分钟）</label>
+                                    <input v-model.number="configForm.auto_fetch.interval_minutes" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">上游 API</label>
+                                    <input v-model="configForm.auto_fetch.api_url" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div class="col-span-2">
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        Registry 类型（逗号分隔）
+                                    </label>
+                                    <input :value="(configForm.auto_fetch.registry_types || []).join(', ')"
+                                        @input="configForm.auto_fetch.registry_types = $event.target.value.split(',').map(s => s.trim()).filter(Boolean)"
+                                        type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder="hub, ghcr, quay, mcr, gcr, elastic, nvcr">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">筛选：access</label>
+                                    <input v-model="configForm.auto_fetch.filters.access" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">筛选：selectable</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.auto_fetch.filters.selectable" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">仅拉取 selectable=true</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                在线检测
+                                <span class="text-[10px] text-amber-600 font-normal ml-1">(interval 需重启)</span>
+                            </h4>
+                            <div class="grid grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">检测间隔（分钟）</label>
+                                    <input v-model.number="configForm.health_check.interval_minutes" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">超时（秒）</label>
+                                    <input v-model.number="configForm.health_check.timeout_seconds" type="number"
+                                        step="0.1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">并发数</label>
+                                    <input v-model.number="configForm.health_check.concurrent_batch" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">延迟阈值（ms）</label>
+                                    <input v-model.number="configForm.health_check.latency_threshold" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">离线阈值（ms）</label>
+                                    <input v-model.number="configForm.health_check.disable_threshold" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">自动恢复</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.health_check.auto_recover" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">冷却后重试</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">恢复等待（分钟）</label>
+                                    <input v-model.number="configForm.health_check.recover_after_minutes" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                速度测试
+                                <span class="text-[10px] text-amber-600 font-normal ml-1">(interval 需重启)</span>
+                            </h4>
+                            <div class="grid grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">启用</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.speed_test.enabled" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">速度测试</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">测试间隔（分钟）</label>
+                                    <input v-model.number="configForm.speed_test.interval_minutes" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">下载时长（秒）</label>
+                                    <input v-model.number="configForm.speed_test.duration_seconds" type="number"
+                                        step="0.5"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">并发数</label>
+                                    <input v-model.number="configForm.speed_test.concurrent_batch" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">测试 tag</label>
+                                    <input v-model="configForm.speed_test.tag" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                            <div class="mt-4">
+                                <label class="block text-xs font-medium text-gray-600 mb-1">
+                                    各 Registry 测试镜像（JSON）
+                                </label>
+                                <textarea v-model="configJsonStrings.test_images_by_type" spellcheck="false" rows="8"
+                                    class="w-full text-[12px] leading-relaxed border border-gray-200 rounded p-2 bg-gray-50 font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"></textarea>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ===== 访问 & 搜索 ===== -->
+                    <template v-if="activeConfigTab === 'access'">
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">访问控制</h4>
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        IP 白名单（逗号分隔，支持 CIDR；留空表示不限制）
+                                    </label>
+                                    <input :value="(configForm.access.ip_whitelist || []).join(', ')"
+                                        @input="configForm.access.ip_whitelist = $event.target.value.split(',').map(s => s.trim()).filter(Boolean)"
+                                        type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder="192.168.1.100, 10.0.0.0/8">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        镜像白名单正则（留空不限制）
+                                    </label>
+                                    <input v-model="configForm.access.image_whitelist_regex" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder="^library/.*|^ghcr\.io/.*">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        镜像黑名单正则（优先级高于白名单）
+                                    </label>
+                                    <input v-model="configForm.access.image_blacklist_regex" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder=".*:latest$">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">镜像搜索</h4>
+                            <div class="grid grid-cols-3 gap-4 mb-3">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">启用</label>
+                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                                        <input v-model="configForm.search.enabled" type="checkbox"
+                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
+                                        <span class="text-xs text-gray-500">后端搜索</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">每页数量</label>
+                                    <input v-model.number="configForm.search.page_size" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">超时（秒）</label>
+                                    <input v-model.number="configForm.search.timeout" type="number" step="0.5"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">
+                                    搜索代理列表（JSON，形如 [{"name": "x", "url": "..."}]）
+                                </label>
+                                <textarea v-model="configJsonStrings.search_upstreams" spellcheck="false" rows="6"
+                                    class="w-full text-[12px] leading-relaxed border border-gray-200 rounded p-2 bg-gray-50 font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"></textarea>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ===== 日志 ===== -->
+                    <template v-if="activeConfigTab === 'logging'">
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                日志
+                                <span class="text-[10px] text-amber-600 font-normal ml-1">(需重启生效)</span>
+                            </h4>
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志级别</label>
+                                    <select v-model="configForm.logging.level"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-blue-500">
+                                        <option>DEBUG</option>
+                                        <option>INFO</option>
+                                        <option>WARNING</option>
+                                        <option>ERROR</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">第三方库级别</label>
+                                    <select v-model="configForm.logging.third_party_level"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-blue-500">
+                                        <option>DEBUG</option>
+                                        <option>INFO</option>
+                                        <option>WARNING</option>
+                                        <option>ERROR</option>
+                                        <option>CRITICAL</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志文件</label>
+                                    <input v-model="configForm.logging.file" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">单文件上限（字节）</label>
+                                    <input v-model.number="configForm.logging.max_bytes" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">保留份数</label>
+                                    <input v-model.number="configForm.logging.backup_count" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ===== 高级 ===== -->
+                    <template v-if="activeConfigTab === 'advanced'">
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">自定义节点（JSON）</h4>
+                            <p class="text-[11px] text-gray-500 mb-2 leading-relaxed">
+                                也可在「加速节点 → 添加节点」中维护，这里修改后保存会自动同步到数据库。
+                            </p>
+                            <textarea v-model="configJsonStrings.custom_nodes" spellcheck="false" rows="8"
+                                class="w-full text-[12px] leading-relaxed border border-gray-200 rounded p-2 bg-gray-50 font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"></textarea>
+                        </div>
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">手动禁用列表（JSON）</h4>
+                            <p class="text-[11px] text-gray-500 mb-2 leading-relaxed">
+                                手动禁用的节点在自动拉取后仍保持禁用。也可在节点列表里直接操作。
+                            </p>
+                            <textarea v-model="configJsonStrings.manually_disabled" spellcheck="false" rows="6"
+                                class="w-full text-[12px] leading-relaxed border border-gray-200 rounded p-2 bg-gray-50 font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"></textarea>
+                        </div>
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">路由别名（JSON）</h4>
+                            <p class="text-[11px] text-gray-500 mb-2 leading-relaxed">
+                                留空 <code class="bg-gray-100 px-1 rounded">{}</code> 表示使用内置默认。
+                            </p>
+                            <textarea v-model="configJsonStrings.route_aliases" spellcheck="false" rows="6"
+                                class="w-full text-[12px] leading-relaxed border border-gray-200 rounded p-2 bg-gray-50 font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"></textarea>
+                        </div>
+                    </template>
+
+                </div>
+
+                <!-- Footer -->
+                <div class="px-6 py-3 border-t flex justify-between items-center flex-wrap gap-2">
+                    <div class="text-[11px] text-gray-400">
+                        <i class="fas fa-keyboard mr-1"></i>
+                        <span v-if="configLoading">加载中…</span>
+                        <span v-else-if="configDirty" class="text-amber-600">有未保存的修改</span>
+                        <span v-else>修改后点击「保存并重载」</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button @click="loadConfig" :disabled="configLoading || configSaving"
+                            class="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-50">
+                            <i class="fas fa-redo mr-1" :class="{'fa-spin': configLoading}"></i> 重新载入
+                        </button>
+                        <button @click="closeConfigModal"
+                            class="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded">
+                            关闭
+                        </button>
+                        <button @click="saveConfig" :disabled="configSaving || configLoading || !configDirty"
+                            class="px-4 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+                            <i class="fas fa-save mr-1" :class="{'fa-spin': configSaving}"></i>
+                            [[ configSaving ? '保存中…' : '保存并重载' ]]
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="mt-10 mb-5 text-center text-gray-500 text-xs tracking-wide">
+            <p class="flex items-center justify-center gap-1 flex-wrap">
+                <span class="mono-num">© 2026-{{ current_year }}</span>
+                <a href="https://github.com/1983shake/Docker-Assistant" target="_blank"
+                    class="text-blue-600 hover:text-blue-800 transition font-medium inline-flex items-center">
+                    <i class="fab fa-github mr-1"></i>Docker-Assistant
+                </a>
+                <span class="text-gray-300">·</span>
+                <span class="text-[10.5px] text-gray-400 mono-num">v{{ app_version }}</span>
+            </p>
+        </footer>
+    </div>
+
+    <script>
+        // ECharts 懒加载
+        (function () {
+            let state = 'idle';
+            const callbacks = [];
+            window.__loadECharts = function (cb) {
+                if (state === 'loaded') return cb();
+                callbacks.push(cb);
+                if (state === 'loading') return;
+                state = 'loading';
+                const s = document.createElement('script');
+                s.src = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
+                s.async = true;
+                s.onload = () => {
+                    state = 'loaded';
+                    callbacks.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
+                    callbacks.length = 0;
+                };
+                s.onerror = () => {
+                    state = 'idle';
+                    callbacks.length = 0;
+                    console.error('ECharts 加载失败');
+                };
+                document.head.appendChild(s);
+            };
+        })();
+
+        // 顶部进度条控制
+        (function () {
+            window.__topProgress = {
+                set(pct) {
+                    const bar = document.querySelector('#top-progress .bar');
+                    if (bar) bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+                },
+                done() {
+                    const el = document.getElementById('top-progress');
+                    if (el) {
+                        el.style.transition = 'opacity .4s';
+                        el.style.opacity = '0';
+                        setTimeout(() => el.remove(), 500);
+                    }
+                }
+            };
+            window.__topProgress.set(15);
+        })();
+
+        // Vue 应用
+        (function () {
+            function mountApp() {
+                const { createApp } = Vue;
+
+                createApp({
+                    delimiters: ['[[', ']]'],
+                    data() {
+                        return {
+                            searchQuery: '',
+                            searchResults: [],
+                            searchError: '',
+                            searching: false,
+                            searchSource: '',
+                            searchAttempts: [],
+                            nodeSearchQuery: '',
+                            proxies: JSON.parse('{{ proxies | tojson | safe }}'),
+                            stats: JSON.parse('{{ stats | tojson | safe }}'),
+                            pullHistory: JSON.parse('{{ pull_history | tojson | safe }}'),
+                            host: window.location.host,
+                            showAddModal: false,
+                            showPullsModal: false,
+                            showHelpModal: false,
+                            showLogsModal: false,
+                            showConfigModal: false,
+
+                            // ===== 配置表单 =====
+                            configForm: {
+                                app: { name: '', tagline: '' },
+                                server: { host: '0.0.0.0', port: 8000, debug: false },
+                                admin: { user: '', pass: '' },
+                                proxy: {
+                                    timeout: 10.0,
+                                    timeout_by_path: { probe: 3.0, manifests: 5.0, blobs: 10.0 },
+                                    stream_chunk_size: 1048576,
+                                    max_redirects: 5,
+                                    fail_cooldown: 60,
+                                    timeout_fail_cooldown: 300,
+                                    forbidden_fail_cooldown: 600,
+                                    server_err_fail_cooldown: 180,
+                                    probe_timeout: 2.0,
+                                    follow_redirects: true,
+                                    follow_redirects_max: 5,
+                                    follow_redirect_fail_cooldown: 300,
+                                    blob_fail_cooldown: 600,
+                                    prefer_recent_success: true,
+                                    recent_success_window: 300,
+                                    affinity_window: 300,
+                                    probe_node_window: 600,
+                                },
+                                access: { ip_whitelist: [], image_whitelist_regex: '', image_blacklist_regex: '' },
+                                auto_fetch: {
+                                    enabled: true, interval_minutes: 1440,
+                                    api_url: 'https://status.anye.xyz',
+                                    registry_types: [],
+                                    filters: { selectable: true, access: 'public' },
+                                },
+                                health_check: {
+                                    interval_minutes: 60, timeout_seconds: 5.0,
+                                    latency_threshold: 500, disable_threshold: 9999,
+                                    concurrent_batch: 5, auto_recover: true, recover_after_minutes: 120,
+                                },
+                                speed_test: {
+                                    enabled: true, interval_minutes: 720, duration_seconds: 5.0,
+                                    tag: 'latest', concurrent_batch: 5, test_images_by_type: {},
+                                },
+                                logging: {
+                                    level: 'INFO', file: 'data/dockermirrorflow.log',
+                                    max_bytes: 10485760, backup_count: 5, third_party_level: 'WARNING',
+                                },
+                                search: { enabled: true, page_size: 25, timeout: 10.0, upstreams: [] },
+                                route_aliases: {}, custom_nodes: [], manually_disabled: [],
+                            },
+                            configJsonStrings: {
+                                test_images_by_type: '{}',
+                                route_aliases: '{}',
+                                custom_nodes: '[]',
+                                manually_disabled: '[]',
+                                search_upstreams: '[]',
+                            },
+                            configPath: '',
+                            configLoading: false,
+                            configSaving: false,
+                            configStatus: '',
+                            configStatusType: '',
+                            configDirty: false,
+                            activeConfigTab: 'basic',
+                            configTabs: [
+                                { key: 'basic', label: '基础', icon: 'fas fa-cog' },
+                                { key: 'proxy', label: '代理', icon: 'fas fa-exchange-alt' },
+                                { key: 'schedule', label: '调度', icon: 'fas fa-clock' },
+                                { key: 'access', label: '访问/搜索', icon: 'fas fa-shield-alt' },
+                                { key: 'logging', label: '日志', icon: 'fas fa-file-alt' },
+                                { key: 'advanced', label: '高级', icon: 'fas fa-code' },
+                            ],
+
+                            healthLogs: [],
+                            helpCommand: '',
+                            helpTitle: '',
+                            isEdit: false,
+                            formNode: {
+                                id: null, name: '', url: '', registry_type: 'dockerhub',
+                                route_prefix: '', username: '', password: ''
+                            },
+                            testing: false,
+                            fetching: false,
+                            initialLoading: true,
+                            currentTab: 'all',
+                            currentPage: 1,
+                            pageSize: (() => {
+                                try {
+                                    // 使用带版本号的 key，避免旧版本遗留的 dmf_pageSize 值影响新默认值
+                                    const saved = parseInt(localStorage.getItem('dmf_pageSize_v2') || '5', 10);
+                                    return [5, 10, 25, 50, 100, 200].includes(saved) ? saved : 5;
+                                } catch (e) {
+                                    return 5;
+                                }
+                            })(),
+                            sortKey: 'speed',
+                            sortOrder: 'desc',
+                            selectedIds: [],
+                            testingIds: [],
+                            taskProgress: {},
+                            pollTimer: null,
+                            _hadRunningTask: false,
+                            manualOperation: false,
+                            tabs: [
+                                { label: '全部', value: 'all' },
+                                { label: 'DockerHub', value: 'dockerhub' },
+                                { label: 'GHCR', value: 'ghcr' },
+                                { label: 'GCR', value: 'gcr' },
+                                { label: 'Quay', value: 'quay' },
+                                { label: 'MCR', value: 'mcr' },
+                                { label: '其他', value: 'other' }
+                            ]
+                        }
+                    },
+                    computed: {
+                        filteredProxies() {
+                            let list = [...this.proxies];
+                            if (this.currentTab !== 'all') {
+                                list = list.filter(p => (p.registry_type || 'dockerhub') === this.currentTab);
+                            }
+                            if (this.nodeSearchQuery) {
+                                const q = this.nodeSearchQuery.toLowerCase();
+                                list = list.filter(p =>
+                                    p.name.toLowerCase().includes(q) ||
+                                    p.url.toLowerCase().includes(q) ||
+                                    (p.registry_type || 'dockerhub').toLowerCase().includes(q) ||
+                                    (p.route_prefix && p.route_prefix.toLowerCase().includes(q))
+                                );
+                            }
+                            list.sort((a, b) => {
+                                let valA = a[this.sortKey];
+                                let valB = b[this.sortKey];
+
+                                if (this.sortKey === 'speed') {
+                                    valA = a.speed || 0;
+                                    valB = b.speed || 0;
+                                } else if (this.sortKey === 'latency') {
+                                    valA = !a.enabled ? 99999 : (a.latency ?? 9999);
+                                    valB = !b.enabled ? 99999 : (b.latency ?? 9999);
+                                } else if (this.sortKey === 'download_bytes') {
+                                    valA = a.download_bytes || 0;
+                                    valB = b.download_bytes || 0;
+                                } else if (typeof valA === 'string' && typeof valB === 'string') {
+                                    valA = valA.toLowerCase();
+                                    valB = valB.toLowerCase();
+                                }
+
+                                let modifier = this.sortOrder === 'desc' ? -1 : 1;
+                                if (valA < valB) return -1 * modifier;
+                                if (valA > valB) return 1 * modifier;
+                                return 0;
+                            });
+                            return list;
+                        },
+                        paginatedProxies() {
+                            const start = (this.currentPage - 1) * this.pageSize;
+                            return this.filteredProxies.slice(start, start + this.pageSize);
+                        },
+                        totalPages() {
+                            return Math.ceil(this.filteredProxies.length / this.pageSize) || 1;
+                        },
+                        progressTasks() {
+                            return Object.entries(this.taskProgress)
+                                .filter(([_, v]) => v.running)
+                                .map(([k, v]) => ({ key: k, ...v }));
+                        }
+                    },
+                    watch: {
+                        filteredProxies() {
+                            if (this.currentPage > this.totalPages) {
+                                this.currentPage = this.totalPages || 1;
+                            }
+                        },
+                        configForm: {
+                            handler() { if (!this.configLoading) this.configDirty = true; },
+                            deep: true,
+                        },
+                        configJsonStrings: {
+                            handler() { if (!this.configLoading) this.configDirty = true; },
+                            deep: true,
+                        },
+                        proxies() {
+                            const validIds = new Set(this.proxies.map(p => p.id));
+                            this.selectedIds = this.selectedIds.filter(id => validIds.has(id));
+                        }
+                    },
+                    mounted() {
+                        this.$nextTick(() => {
+                            const app = document.getElementById('app');
+                            if (app) app.classList.add('app-ready');
+                            const skeleton = document.getElementById('boot-skeleton');
+                            if (skeleton) {
+                                skeleton.classList.add('hide');
+                                setTimeout(() => skeleton.remove(), 400);
+                            }
+                            if (window.__topProgress) {
+                                window.__topProgress.set(60);
+                                setTimeout(() => window.__topProgress.set(100), 200);
+                                setTimeout(() => window.__topProgress.done(), 500);
+                            }
+                        });
+
+                        if (this.stats.length > 0) {
+                            const kick = () => window.__loadECharts(() => this.initChart());
+                            if ('requestIdleCallback' in window) {
+                                requestIdleCallback(kick, { timeout: 2000 });
+                            } else {
+                                setTimeout(kick, 500);
+                            }
+                        }
+
+                        this.startPolling();
+                        setTimeout(() => { this.initialLoading = false; }, 800);
+                    },
+                    beforeUnmount() {
+                        this.stopPolling();
+                    },
+                    methods: {
+                        onPageSizeChange() {
+                            this.currentPage = 1;
+                            try {
+                                localStorage.setItem('dmf_pageSize_v2', String(this.pageSize));
+                            } catch (e) {
+                                console.warn('无法保存 pageSize:', e);
+                            }
+                        },
+
+                        // ============ 任务进度轮询 ============
+                        startPolling() {
+                            if (this.pollTimer) return;
+                            this.pollTasks();
+                            this.pollTimer = setInterval(() => this.pollTasks(), 1500);
+                        },
+                        stopPolling() {
+                            if (this.pollTimer) {
+                                clearInterval(this.pollTimer);
+                                this.pollTimer = null;
+                            }
+                        },
+                        async pollTasks() {
+                            try {
+                                const res = await fetch('/api/tasks/status', { cache: 'no-store' });
+                                if (!res.ok) return;
+                                const data = await res.json();
+                                const hasRunning = Object.values(data).some(v => v && v.running);
+                                const hadRunning = this._hadRunningTask === true;
+
+                                this.taskProgress = data;
+                                this._hadRunningTask = hasRunning;
+
+                                if (hadRunning && !hasRunning && !this.manualOperation) {
+                                    console.log('[DockerMirrorFlow] 后台任务完成，自动刷新页面');
+                                    setTimeout(() => window.location.reload(), 400);
+                                }
+                            } catch (e) { /* 忽略网络波动 */ }
+                        },
+
+                        // ============ 搜索 ============
+                        async search() {
+                            const q = (this.searchQuery || '').trim();
+                            if (!q) {
+                                this.searchError = '请输入搜索关键词';
+                                return;
+                            }
+                            this.searching = true;
+                            this.searchError = '';
+                            this.searchResults = [];
+                            this.searchSource = '';
+                            this.searchAttempts = [];
+
+                            try {
+                                const ctrl = new AbortController();
+                                const timer = setTimeout(() => ctrl.abort(), 5000);
+                                const res = await fetch(
+                                    `https://hub.docker.com/v2/search/repositories/?query=${encodeURIComponent(q)}&page_size=25`,
+                                    {
+                                        headers: { 'Accept': 'application/json' },
+                                        signal: ctrl.signal,
+                                    }
+                                );
+                                clearTimeout(timer);
+
+                                if (res.ok) {
+                                    const data = await res.json();
+                                    this.searchResults = data.results || [];
+                                    this.searchSource = '浏览器直连';
+                                    if (this.searchResults.length === 0) {
+                                        this.searchError = '没有找到匹配的镜像';
+                                    }
+                                    this.searching = false;
+                                    return;
+                                }
+                            } catch (e) {
+                                console.warn('浏览器直搜失败:', e.message, '，尝试后端代理');
+                            }
+
+                            try {
+                                const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                                if (!res.ok) {
+                                    this.searchError = `后端搜索失败 (HTTP ${res.status})`;
+                                    return;
+                                }
+                                const data = await res.json();
+                                if (data.error) {
+                                    this.searchError = this._humanizeSearchError(data.error);
+                                    this.searchAttempts = data.attempts || [];
+                                } else {
+                                    this.searchResults = data.results || [];
+                                    this.searchSource = data.source || '后端代理';
+                                    if (this.searchResults.length === 0) {
+                                        this.searchError = '没有找到匹配的镜像';
+                                    }
+                                }
+                            } catch (e) {
+                                this.searchError = `后端搜索异常: ${e.message}`;
+                            } finally {
+                                this.searching = false;
+                            }
+                        },
+
+                        _humanizeSearchError(err) {
+                            if (!err) return '搜索失败';
+                            if (err === 'timeout') return '搜索超时，Docker Hub 无响应，请稍后重试';
+                            if (err === 'connection failed') return '无法连接到上游搜索代理，请检查服务器外网连通性';
+                            if (err === 'empty query') return '请输入搜索关键词';
+                            if (err === 'search disabled') return '后端搜索已在配置中禁用';
+                            if (err === 'no upstream configured') {
+                                return '浏览器无法访问 Docker Hub，且后端未配置搜索代理。请在 config.yaml 的 search.upstreams 中配置。';
+                            }
+                            if (err === 'all upstreams failed') {
+                                return '所有搜索代理均失败，请检查 config.yaml 的 search.upstreams 配置。';
+                            }
+                            if (String(err).startsWith('upstream status')) return `Docker Hub 返回异常 (${err})`;
+                            return `搜索失败: ${err}`;
+                        },
+
+                        // ============ 展示辅助 ============
+                        sortBy(key) {
+                            if (this.sortKey === key) {
+                                this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+                            } else {
+                                this.sortKey = key;
+                                this.sortOrder = key === 'speed' || key === 'download_bytes' ? 'desc' : 'asc';
+                            }
+                        },
+
+                        formatBytes(bytes, decimals = 2) {
+                            if (!+bytes) return '0 B';
+                            const k = 1024;
+                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                            const i = Math.floor(Math.log(bytes) / Math.log(k));
+                            return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
+                        },
+
+                        formatSpeed(bytesPerSec) {
+                            if (!bytesPerSec || bytesPerSec <= 0) return '-';
+                            const k = 1024;
+                            const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+                            const i = Math.floor(Math.log(bytesPerSec) / Math.log(k));
+                            return `${parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+                        },
+
+                        speedColor(speed) {
+                            if (!speed || speed <= 0) return 'text-gray-400';
+                            if (speed >= 5 * 1024 * 1024) return 'text-green-600 font-bold';
+                            if (speed >= 1 * 1024 * 1024) return 'text-blue-600';
+                            if (speed >= 200 * 1024) return 'text-yellow-600';
+                            return 'text-red-500';
+                        },
+
+                        initChart() {
+                            if (this.stats.length === 0) return;
+                            const chartDom = document.getElementById('trafficChart');
+                            if (!chartDom) return;
+                            chartDom.innerHTML = '';
+                            const myChart = echarts.init(chartDom);
+                            const chartData = [...this.stats].reverse().slice(-7);
+
+                            myChart.setOption({
+                                textStyle: {
+                                    fontFamily:
+                                        '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+                                    fontSize: 11,
+                                },
+                                tooltip: {
+                                    trigger: 'axis',
+                                    formatter: '{b}<br/>{c} MB',
+                                    textStyle: { fontSize: 12 },
+                                },
+                                xAxis: {
+                                    type: 'category',
+                                    data: chartData.map(s => s.date),
+                                    axisLabel: { fontSize: 10.5, color: '#6b7280' },
+                                    axisLine: { lineStyle: { color: '#e5e7eb' } },
+                                    axisTick: { show: false },
+                                },
+                                yAxis: {
+                                    type: 'value',
+                                    name: 'MB',
+                                    nameTextStyle: { fontSize: 10.5, color: '#9ca3af' },
+                                    axisLabel: { fontSize: 10.5, color: '#9ca3af' },
+                                    splitLine: { lineStyle: { color: '#f3f4f6' } },
+                                },
+                                grid: { left: '3%', right: '4%', bottom: '3%', top: 18, containLabel: true },
+                                series: [{
+                                    data: chartData.map(s => (s.download_bytes / 1024 / 1024).toFixed(2)),
+                                    type: 'line',
+                                    smooth: true,
+                                    symbolSize: 6,
+                                    areaStyle: { opacity: 0.25 },
+                                    itemStyle: { color: '#0f4c81' },
+                                    lineStyle: { color: '#0f4c81', width: 2.2 }
+                                }]
+                            });
+                            window.addEventListener('resize', () => myChart.resize());
+                        },
+
+                        // ============ 节点操作 ============
+                        exportNodes() {
+                            window.location.href = '/api/proxies/export';
+                        },
+
+                        async importNodes(event) {
+                            const file = event.target.files[0];
+                            if (!file) return;
+                            const reader = new FileReader();
+                            reader.onload = async (e) => {
+                                try {
+                                    const data = JSON.parse(e.target.result);
+                                    const res = await fetch('/api/proxies/import', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify(data)
+                                    });
+                                    if (res.ok) {
+                                        alert("导入成功");
+                                        window.location.reload();
+                                    } else {
+                                        alert("导入失败");
+                                    }
+                                } catch (err) {
+                                    alert("无效的 JSON 文件");
+                                }
+                            };
+                            reader.readAsText(file);
+                            event.target.value = '';
+                        },
+
+                        copyCommand(img) {
+                            const name = img.repo_name.includes('/') ? img.repo_name : `library/${img.repo_name}`;
+                            const cmd = `docker pull ${this.host}/${name}`;
+                            this.copyToClipboard(cmd);
+                        },
+
+                        copyHelpCommand() {
+                            this.copyToClipboard(this.helpCommand);
+                        },
+
+                        copyToClipboard(text) {
+                            if (!navigator.clipboard) {
+                                const textArea = document.createElement("textarea");
+                                textArea.value = text;
+                                textArea.style.position = "fixed";
+                                document.body.appendChild(textArea);
+                                textArea.focus();
+                                textArea.select();
+                                try { document.execCommand('copy'); } catch (err) { console.error(err); }
+                                document.body.removeChild(textArea);
+                                return;
+                            }
+                            navigator.clipboard.writeText(text).catch(err => console.error(err));
+                        },
+
+                        showHelp(node) {
+                            const type = node.registry_type || 'dockerhub';
+                            const prefix = node.route_prefix ? node.route_prefix + '/' : '';
+                            if (type === 'dockerhub') {
+                                this.helpCommand = `docker pull ${this.host}/library/nginx`;
+                            } else if (type === 'ghcr') {
+                                this.helpCommand = `docker pull ${this.host}/${prefix || 'ghcr.io/'}owner/image:tag`;
+                            } else if (type === 'gcr') {
+                                this.helpCommand = `docker pull ${this.host}/${prefix || 'gcr.io/'}project-id/image:tag`;
+                            } else if (type === 'quay') {
+                                this.helpCommand = `docker pull ${this.host}/${prefix || 'quay.io/'}organization/image:tag`;
+                            } else {
+                                this.helpCommand = `docker pull ${this.host}/${prefix}image:tag`;
+                            }
+                            this.helpTitle = `如何使用 ${node.name}`;
+                            this.showHelpModal = true;
+                        },
+
+                        async clearPulls() {
+                            if (confirm("确定要清空所有的拉取记录吗？此操作不可恢复。")) {
+                                const res = await fetch('/api/pulls', { method: 'DELETE' });
+                                if (res.ok) window.location.reload();
+                            }
+                        },
+
+                        async fetchNodes() {
+                            this.fetching = true;
+                            this.manualOperation = true;
+                            this.startPolling();
+                            try {
+                                const res = await fetch('/api/proxies/fetch', { method: 'POST' });
+                                if (res.ok) {
+                                    const data = await res.json();
+                                    alert(`拉取完成，新增 ${data.added} 个节点。已自动执行在线检测与速度测试。`);
+                                    window.location.reload();
+                                }
+                            } catch (e) {
+                                alert("获取节点失败");
+                                this.manualOperation = false;
+                            } finally {
+                                this.fetching = false;
+                            }
+                        },
+
+                        async runHealthCheck() {
+                            if (this.selectedIds.length === 0) {
+                                alert('请先勾选要在线检测的节点');
+                                return;
+                            }
+                            const ids = [...this.selectedIds];
+                            this.testing = true;
+                            this.manualOperation = true;
+                            this.startPolling();
+                            try {
+                                await fetch('/api/test-health', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ ids })
+                                });
+                            } catch (e) {
+                                console.error(e);
+                                this.manualOperation = false;
+                            } finally {
+                                this.testing = false;
+                                setTimeout(() => window.location.reload(), 500);
+                            }
+                        },
+
+                        async runSpeedTest() {
+                            if (this.selectedIds.length === 0) {
+                                alert('请先勾选要速度测试的节点');
+                                return;
+                            }
+                            const ids = [...this.selectedIds];
+                            this.testing = true;
+                            this.manualOperation = true;
+                            this.startPolling();
+                            try {
+                                await fetch('/api/test-speed', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ ids })
+                                });
+                            } catch (e) {
+                                console.error(e);
+                                this.manualOperation = false;
+                            } finally {
+                                this.testing = false;
+                                setTimeout(() => window.location.reload(), 500);
+                            }
+                        },
+
+                        openAddModal() {
+                            this.isEdit = false;
+                            this.formNode = {
+                                id: null, name: '', url: '', registry_type: 'dockerhub',
+                                route_prefix: '', username: '', password: ''
+                            };
+                            this.showAddModal = true;
+                        },
+
+                        openEditModal(node) {
+                            this.isEdit = true;
+                            this.formNode = {
+                                id: node.id,
+                                name: node.name,
+                                url: node.url,
+                                registry_type: node.registry_type || 'dockerhub',
+                                route_prefix: node.route_prefix || '',
+                                username: node.username || '',
+                                password: node.password || ''
+                            };
+                            this.showAddModal = true;
+                        },
+
+                        async submitNode() {
+                            const formData = new FormData();
+                            formData.append('name', this.formNode.name);
+                            formData.append('url', this.formNode.url);
+                            formData.append('registry_type', this.formNode.registry_type);
+                            if (this.formNode.route_prefix) formData.append('route_prefix', this.formNode.route_prefix);
+                            if (this.formNode.username) formData.append('username', this.formNode.username);
+                            if (this.formNode.password) formData.append('password', this.formNode.password);
+
+                            if (this.isEdit) {
+                                await fetch(`/api/proxies/${this.formNode.id}`, { method: 'PUT', body: formData });
+                            } else {
+                                await fetch('/api/proxies', { method: 'POST', body: formData });
+                            }
+                            window.location.reload();
+                        },
+
+                        async deleteNode(id) {
+                            if (confirm('确定要删除这个节点吗？')) {
+                                await fetch(`/api/proxies/${id}`, { method: 'DELETE' });
+                                window.location.reload();
+                            }
+                        },
+
+                        async disableNode(node) {
+                            const reason = prompt('请输入禁用原因（可选）:', '') ?? '';
+                            const fd = new FormData();
+                            fd.append('reason', reason);
+                            await fetch(`/api/proxies/${node.id}/disable`, { method: 'POST', body: fd });
+                            window.location.reload();
+                        },
+
+                        async enableNode(node) {
+                            await fetch(`/api/proxies/${node.id}/enable`, { method: 'POST' });
+                            window.location.reload();
+                        },
+
+                        selectAll(event) {
+                            if (event.target.checked) {
+                                this.selectedIds = this.paginatedProxies.map(p => p.id);
+                            } else {
+                                this.selectedIds = [];
+                            }
+                        },
+
+                        async batchDisable() {
+                            if (!confirm(`确定禁用选中的 ${this.selectedIds.length} 个节点？`)) return;
+                            const reason = prompt('禁用原因（可选）:', '') ?? '';
+                            await fetch('/api/proxies/batch-disable', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ ids: this.selectedIds, reason })
+                            });
+                            window.location.reload();
+                        },
+
+                        async batchEnable() {
+                            if (!confirm(`确定启用选中的 ${this.selectedIds.length} 个节点？`)) return;
+                            await fetch('/api/proxies/batch-enable', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ ids: this.selectedIds })
+                            });
+                            window.location.reload();
+                        },
+
+                        async loadHealthLogs(nodeId) {
+                            const res = await fetch(`/api/health-logs/${nodeId}?limit=50`);
+                            if (res.ok) {
+                                this.healthLogs = await res.json();
+                                this.showLogsModal = true;
+                            }
+                        },
+
+                        // ============ 配置编辑 ============
+                        async openConfigModal() {
+                            this.showConfigModal = true;
+                            this.activeConfigTab = 'basic';
+                            this.configStatus = '';
+                            this.configStatusType = '';
+                            this.configDirty = false;
+                            await this.loadConfig();
+                        },
+
+                        _deepMerge(target, source) {
+                            if (!source || typeof source !== 'object') return target;
+                            for (const key of Object.keys(source)) {
+                                const sv = source[key];
+                                if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
+                                    target[key] = this._deepMerge(
+                                        target[key] && typeof target[key] === 'object' ? target[key] : {},
+                                        sv
+                                    );
+                                } else {
+                                    target[key] = sv;
+                                }
+                            }
+                            return target;
+                        },
+
+                        _setPath(path, value) {
+                            let obj = this.configForm;
+                            for (let i = 0; i < path.length - 1; i++) {
+                                if (!obj[path[i]] || typeof obj[path[i]] !== 'object') obj[path[i]] = {};
+                                obj = obj[path[i]];
+                            }
+                            obj[path[path.length - 1]] = value;
+                        },
+
+                        async loadConfig() {
+                            this.configLoading = true;
+                            this.configStatus = '';
+                            this.configStatusType = 'info';
+                            this.configStatus = '正在载入配置…';
+                            try {
+                                const res = await fetch('/api/config');
+                                if (!res.ok) {
+                                    const err = await res.json().catch(() => ({}));
+                                    this.configStatusType = 'error';
+                                    this.configStatus = `载入失败 (HTTP ${res.status}): ${err.detail || ''}`;
+                                    return;
+                                }
+                                const data = await res.json();
+                                this.configPath = data.path || '';
+
+                                // 从空模板开始，合并磁盘里的配置
+                                const base = JSON.parse(JSON.stringify(this.$options.data().configForm));
+                                const merged = this._deepMerge(base, data.config || {});
+                                this.configForm = merged;
+
+                                // 用原始 JSON 字符串承载复杂字段
+                                this.configJsonStrings.test_images_by_type =
+                                    JSON.stringify(this.configForm.speed_test.test_images_by_type || {}, null, 2);
+                                this.configJsonStrings.route_aliases =
+                                    JSON.stringify(this.configForm.route_aliases || {}, null, 2);
+                                this.configJsonStrings.custom_nodes =
+                                    JSON.stringify(this.configForm.custom_nodes || [], null, 2);
+                                this.configJsonStrings.manually_disabled =
+                                    JSON.stringify(this.configForm.manually_disabled || [], null, 2);
+                                this.configJsonStrings.search_upstreams =
+                                    JSON.stringify((this.configForm.search || {}).upstreams || [], null, 2);
+
+                                this.$nextTick(() => { this.configDirty = false; });
+                                this.configStatusType = 'success';
+                                this.configStatus = '配置已载入';
+                                setTimeout(() => {
+                                    if (this.configStatus === '配置已载入') {
+                                        this.configStatus = '';
+                                        this.configStatusType = '';
+                                    }
+                                }, 1500);
+                            } catch (e) {
+                                this.configStatusType = 'error';
+                                this.configStatus = `载入异常: ${e.message}`;
+                            } finally {
+                                this.configLoading = false;
+                            }
+                        },
+
+                        async saveConfig() {
+                            // 先解析 JSON 字段
+                            const jsonFields = [
+                                { key: 'test_images_by_type', path: ['speed_test', 'test_images_by_type'] },
+                                { key: 'route_aliases', path: ['route_aliases'] },
+                                { key: 'custom_nodes', path: ['custom_nodes'] },
+                                { key: 'manually_disabled', path: ['manually_disabled'] },
+                                { key: 'search_upstreams', path: ['search', 'upstreams'] },
+                            ];
+                            for (const f of jsonFields) {
+                                try {
+                                    const parsed = JSON.parse(this.configJsonStrings[f.key] || 'null');
+                                    if (parsed === null) throw new Error('不能为空');
+                                    this._setPath(f.path, parsed);
+                                } catch (e) {
+                                    this.configStatusType = 'error';
+                                    this.configStatus = `字段「${f.key}」JSON 无效: ${e.message}`;
+                                    return;
+                                }
+                            }
+
+                            this.configSaving = true;
+                            this.configStatusType = 'info';
+                            this.configStatus = '正在保存并重载…';
+                            try {
+                                const res = await fetch('/api/config', {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ config: this.configForm }),
+                                });
+                                const data = await res.json().catch(() => ({}));
+                                if (!res.ok) {
+                                    this.configStatusType = 'error';
+                                    this.configStatus = `保存失败 (HTTP ${res.status}): ${data.detail || JSON.stringify(data)}`;
+                                    return;
+                                }
+                                this.configStatusType = 'success';
+                                this.configStatus = `✅ ${data.message || '配置已保存并重载'}${data.backup ? '\n备份：' + data.backup : ''}\n部分字段需要重启服务才能生效。`;
+                                this.configDirty = false;
+                                setTimeout(() => window.location.reload(), 2000);
+                            } catch (e) {
+                                this.configStatusType = 'error';
+                                this.configStatus = `保存异常: ${e.message}`;
+                            } finally {
+                                this.configSaving = false;
+                            }
+                        },
+
+                        closeConfigModal() {
+                            if (this.configDirty && !confirm('有未保存的修改，确定要关闭吗？')) {
+                                return;
+                            }
+                            this.showConfigModal = false;
+                            this.configDirty = false;
+                        }
+                    }
+                }).mount('#app');
+            }
+
+            if (!window.Vue) {
+                document.addEventListener('DOMContentLoaded', () => {
+                    if (window.Vue) mountApp();
+                    else console.error('Vue 未加载');
+                });
+                return;
+            }
+            mountApp();
+        })();
+    </script>
+</body>
+
+</html>

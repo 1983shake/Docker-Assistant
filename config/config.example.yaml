@@ -1,0 +1,194 @@
+# ============================================================
+#  Docker-Assistant 配置文件  v1.0.0
+#  镜像加速 · 容器更新  —— 一体化管理平台
+#
+#  首次启动会自动复制本文件为 config/config.yaml；
+#  后续通过 Web 后台「配置文件 / 设置」按钮在线编辑，保存后自动重载。
+#
+#  ────────────────────────────────────────────────────────────
+#  生效说明
+#  ────────────────────────────────────────────────────────────
+#    立即生效（Web 保存后自动重载）：
+#      admin.*、proxy.*、access.*、custom_nodes、manually_disabled、
+#      route_aliases、search.*、speed_test.*、updater.*（除 interval）
+#
+#    需要重启服务：
+#      server.*、logging.*
+#      auto_fetch.interval_minutes / health_check.interval_minutes /
+#      speed_test.interval_minutes / updater.check_interval_minutes
+# ============================================================
+
+# ------------------------------------------------------------
+# 应用元信息（固定值，此处修改无效）
+# ------------------------------------------------------------
+app:
+  name: "Docker-Assistant"
+  tagline: "镜像加速 · 容器更新"
+  version: "1.0.0"
+
+# ------------------------------------------------------------
+# 服务器配置（修改后需重启）
+# ------------------------------------------------------------
+server:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+
+# ------------------------------------------------------------
+# 管理后台认证（留空则关闭认证；生产环境务必设置）
+# ------------------------------------------------------------
+admin:
+  user: "admin"
+  pass: "change_me"
+
+# ------------------------------------------------------------
+# 镜像代理行为（来自 DockerMirrorFlow）
+# ------------------------------------------------------------
+proxy:
+  timeout: 10.0
+  timeout_by_path:
+    probe: 3.0
+    manifests: 5.0
+    blobs: 10.0
+  blob_read_timeout: null
+  blob_header_timeout: 30.0
+  blob_first_byte_timeout: 30.0
+  stream_chunk_size: 1048576
+  max_redirects: 5
+  fail_cooldown: 60
+  timeout_fail_cooldown: 300
+  forbidden_fail_cooldown: 600
+  server_err_fail_cooldown: 180
+  probe_timeout: 2.0
+  follow_redirects: true
+  follow_redirects_max: 5
+  follow_redirect_fail_cooldown: 300
+  blob_fail_cooldown: 600
+  prefer_recent_success: true
+  recent_success_window: 120
+  affinity_window: 120
+  probe_node_window: 300
+
+# ------------------------------------------------------------
+# 访问控制
+# ------------------------------------------------------------
+access:
+  ip_whitelist: []
+  image_whitelist_regex: ""
+  image_blacklist_regex: ""
+
+# ------------------------------------------------------------
+# 节点自动拉取
+# ------------------------------------------------------------
+auto_fetch:
+  enabled: true
+  interval_minutes: 1440
+  api_url: "https://status.anye.xyz"
+  registry_types: [hub, ghcr, quay, mcr, gcr, elastic, nvcr]
+  filters:
+    selectable: true
+    access: "public"
+
+# ------------------------------------------------------------
+# 在线检测
+# ------------------------------------------------------------
+health_check:
+  interval_minutes: 60
+  timeout_seconds: 5
+  concurrent_batch: 5
+  latency_threshold: 500
+  disable_threshold: 9999
+  auto_recover: true
+  recover_after_minutes: 120
+
+# ------------------------------------------------------------
+# 速度测试
+# ------------------------------------------------------------
+speed_test:
+  enabled: true
+  interval_minutes: 720
+  duration_seconds: 5.0
+  tag: "latest"
+  concurrent_batch: 5
+  test_images_by_type:
+    dockerhub: "library/python"
+    ghcr: "stefanprodan/podinfo"
+    gcr: "distroless/base"
+    quay: "prometheus/prometheus"
+    mcr: "dotnet/runtime"
+    elastic: "beats/filebeat"
+    nvcr: "nvidia/cuda"
+
+# ------------------------------------------------------------
+# 手动禁用节点
+# ------------------------------------------------------------
+manually_disabled: []
+
+# ------------------------------------------------------------
+# 自定义节点
+# ------------------------------------------------------------
+custom_nodes: []
+
+# ------------------------------------------------------------
+# 路由别名（留空 {} 使用内置默认）
+# ------------------------------------------------------------
+route_aliases: {}
+
+# ------------------------------------------------------------
+# 镜像搜索
+# ------------------------------------------------------------
+search:
+  enabled: true
+  page_size: 25
+  timeout: 10.0
+  upstreams: []
+
+# ------------------------------------------------------------
+# 日志配置（修改后需重启）
+# ------------------------------------------------------------
+logging:
+  level: "INFO"
+  file: "data/dockermirrorflow.log"
+  max_bytes: 10485760
+  backup_count: 5
+  third_party_level: "WARNING"
+
+# ============================================================
+# 容器更新器（合并自 DockerImageUpdater）
+# ============================================================
+updater:
+  enabled: true
+
+  # 检查间隔（分钟），修改后需重启
+  check_interval_minutes: 60
+
+  # 并发检测的容器数量（1-20）
+  check_concurrency: 2
+
+  # 发现新版本时是否自动拉取并重建容器
+  auto_update: false
+
+  # 拉取/检测镜像时使用的加速源（仅对 Docker Hub 生效）
+  mirrors:
+    - "https://docker.m.daocloud.io"
+    - "https://docker.1panel.live"
+    - "https://hub.rat.dev"
+
+  # 加速源失败后是否直连原始 registry
+  use_direct: true
+
+  # 更新（拉取新镜像）时是否也走加速源
+  pull_use_mirror: true
+
+  # 私有仓库认证（可选）
+  registry_username: ""
+  registry_password: ""
+
+  # 本地日志留存
+  log_max_entries: 5000
+  log_retention_days: 7
+  log_display_level: "INFO"
+
+  # 按容器的更新策略
+  # container_name -> {"strategy": "track"|"latest"|"pin", "target_tag": "..."}
+  containers: {}

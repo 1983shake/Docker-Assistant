@@ -1,0 +1,20 @@
+services:
+  docker-assistant:
+    build:
+      context: .
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
+    image: docker-assistant:1.0.0
+    container_name: docker-assistant
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config:/app/config
+      - ./data:/app/data
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - CONFIG_DIR=/app/config
+      - DATA_DIR=/app/data
