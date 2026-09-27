@@ -1,9 +1,8 @@
-"""镜像加速 + 主页 Web UI。"""
+"""镜像加速 + 主页 Web UI（已融合容器更新器）。"""
 
-import shutil
 import secrets
+import shutil
 from datetime import datetime
-from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -13,12 +12,7 @@ from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 
 from app import APP_NAME, APP_TAGLINE, __version__
-from app.config import (
-    CONFIG_PATH,
-    AppConfig,
-    config,
-    reload_config,
-)
+from app.config import CONFIG_PATH, AppConfig, config, reload_config
 from app.database import engine
 from app.models import HealthCheckLog, ProxyNode
 from app.services import proxy_manager, search_service, traffic_logger
@@ -73,6 +67,22 @@ async def index(request: Request):
             "total_download": total_download,
             "pull_stats": pull_stats,
             "pull_history": [p.model_dump(mode="json") for p in pull_history],
+            # 容器更新器初始状态（供融合页面首屏渲染）
+            "updater_enabled": config.updater.enabled,
+            "updater_settings": {
+                "enabled": config.updater.enabled,
+                "check_interval_minutes": config.updater.check_interval_minutes,
+                "check_concurrency": config.updater.check_concurrency,
+                "auto_update": config.updater.auto_update,
+                "mirrors": config.updater.mirrors,
+                "use_direct": config.updater.use_direct,
+                "pull_use_mirror": config.updater.pull_use_mirror,
+                "registry_username": config.updater.registry_username,
+                "registry_password": config.updater.registry_password,
+                "log_max_entries": config.updater.log_max_entries,
+                "log_retention_days": config.updater.log_retention_days,
+                "log_display_level": config.updater.log_display_level,
+            },
         },
     )
 

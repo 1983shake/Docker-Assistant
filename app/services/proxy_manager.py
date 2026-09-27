@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from app.database import engine
 from app.models import ProxyNode, HealthCheckLog, get_shanghai_time
 from app.config import config
+from app.services import progress
 
 logger = logging.getLogger("dockermirrorflow.proxy_manager")
 
@@ -68,64 +69,28 @@ _MAX_SPEED_TOKEN_CACHE = 200
 
 
 # ============================================================
-#  任务进度跟踪（内存态，供 Web 实时反馈）
+#  任务进度跟踪（转发到共享的 progress 模块）
+#
+#  为了让"容器检测"的进度能与"节点检测"在同一浮层显示，
+#  进度状态统一交由 app.services.progress 管理。
 # ============================================================
-
-_progress: dict[str, dict] = {}
-_PROGRESS_TTL = 30  # 已完成任务状态保留秒数
 
 
 def _progress_start(task: str, label: str, total: int = 0, message: str = ""):
-    _progress[task] = {
-        "label": label,
-        "running": True,
-        "done": 0,
-        "total": total,
-        "message": message,
-        "percent": 0,
-        "started_at": time.time(),
-        "updated_at": time.time(),
-    }
+    progress.start(task, label, total, message)
 
 
 def _progress_update(task: str, **kwargs):
-    entry = _progress.get(task)
-    if entry is None:
-        entry = {
-            "label": task,
-            "running": True,
-            "done": 0,
-            "total": 0,
-            "message": "",
-            "percent": 0,
-            "started_at": time.time(),
-        }
-        _progress[task] = entry
-    entry.update(kwargs)
-    total = entry.get("total") or 0
-    done = entry.get("done") or 0
-    entry["percent"] = int(done / total * 100) if total > 0 else 0
-    entry["updated_at"] = time.time()
+    progress.update(task, **kwargs)
 
 
 def _progress_finish(task: str, message: str = "完成"):
-    entry = _progress.get(task)
-    if entry is None:
-        return
-    entry["running"] = False
-    entry["message"] = message
-    entry["percent"] = 100
-    entry["updated_at"] = time.time()
+    progress.finish(task, message)
 
 
 def get_progress() -> dict:
-    """返回当前任务进度（自动清理已结束的旧任务）。"""
-    now = time.time()
-    for k in list(_progress.keys()):
-        v = _progress[k]
-        if not v.get("running") and now - v.get("updated_at", 0) > _PROGRESS_TTL:
-            _progress.pop(k, None)
-    return {k: dict(v) for k, v in _progress.items()}
+    """兼容旧接口：返回当前所有任务进度。"""
+    return progress.get_all()
 
 
 # ============================================================
@@ -1100,3 +1065,102 @@ def set_manual_disable(proxy_id: int, disabled: bool, reason: str = "") -> Optio
         session.commit()
         session.refresh(node)
         return node
+
+
+# ============================================================
+#  启动时检测判断（按上次检测 / 测速时间）
+#
+#  逻辑：
+#    - 首次启动（找不到任何 last_check / 未测过） → 立即执行
+#    - 能找到时间戳，且距今 < 配置周期 → 跳过
+#    - 能找到时间戳，且距今 >= 配置周期 → 执行
+# ============================================================
+
+from datetime import datetime, timedelta, timezone
+
+
+def _ensure_aware(dt: datetime) -> datetime:
+    """
+    SQLite 读回的 datetime 可能丢失 tzinfo，统一补成上海时区（UTC+8）。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt
+
+
+def should_run_health_check() -> bool:
+    """
+    是否需要立即执行在线检测。
+
+    返回 True 的情况：
+      - 所有节点都没有 last_check（首次启动）
+      - 最近一次 last_check 距今 >= health_check.interval_minutes
+
+    返回 False 的情况：
+      - 数据库无节点
+      - 最近一次 last_check 距今 < health_check.interval_minutes
+    """
+    interval_minutes = max(1, int(config.health_check.interval_minutes or 60))
+
+    with Session(engine) as session:
+        nodes = session.exec(select(ProxyNode).where(ProxyNode.manually_disabled == False)).all()  # noqa: E712
+
+    if not nodes:
+        return False
+
+    last_checks = [n.last_check for n in nodes if n.last_check is not None]
+    if not last_checks:
+        logger.info("[startup] 未找到任何 last_check，触发首次在线检测")
+        return True
+
+    latest = max(_ensure_aware(t) for t in last_checks)
+    now = get_shanghai_time()
+    try:
+        elapsed_minutes = (now - latest).total_seconds() / 60
+    except Exception:
+        return True
+
+    logger.info(f"[startup] 上次在线检测：{latest.isoformat()}，" f"距现在 {elapsed_minutes:.1f} 分钟，周期 {interval_minutes} 分钟")
+    return elapsed_minutes >= interval_minutes
+
+
+def should_run_speed_test() -> bool:
+    """
+    是否需要立即执行速度测试。
+
+    返回 True 的情况：
+      - 所有节点的 speed 均为 0（未测过）
+      - 已测过节点的最近 updated_at 距今 >= speed_test.interval_minutes
+
+    返回 False 的情况：
+      - 数据库无节点
+      - 已测过节点的最近 updated_at 距今 < speed_test.interval_minutes
+    """
+    interval_minutes = max(1, int(config.speed_test.interval_minutes or 720))
+
+    with Session(engine) as session:
+        nodes = session.exec(select(ProxyNode).where(ProxyNode.manually_disabled == False)).all()  # noqa: E712
+
+    if not nodes:
+        return False
+
+    tested = [n for n in nodes if (n.speed or 0) > 0]
+    if not tested:
+        logger.info("[startup] 未找到任何测速记录，触发首次速度测试")
+        return True
+
+    timestamps = [_ensure_aware(n.updated_at) for n in tested if n.updated_at is not None]
+    if not timestamps:
+        return True
+
+    latest = max(timestamps)
+    now = get_shanghai_time()
+    try:
+        elapsed_minutes = (now - latest).total_seconds() / 60
+    except Exception:
+        return True
+
+    logger.info(f"[startup] 上次速度测试：{latest.isoformat()}，" f"距现在 {elapsed_minutes:.1f} 分钟，周期 {interval_minutes} 分钟")
+    return elapsed_minutes >= interval_minutes

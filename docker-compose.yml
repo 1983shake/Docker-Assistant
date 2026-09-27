@@ -3,18 +3,27 @@ services:
     build:
       context: .
       args:
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
-        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
-    image: docker-assistant:1.0.0
+        # 基础镜像。默认走国内公共代理（DaoCloud）。
+        #
+        # 换成其他可用地址（按需替换）：
+        #   - DaoCloud 代理：       docker.m.daocloud.io/library/python:3.12.10-slim
+        #   - 1ms 代理：            docker.1ms.run/library/python:3.12.10-slim
+        #   - 1Panel 代理：         docker.1panel.live/library/python:3.12.10-slim
+        #   - 阿里云个人加速器：     <your-id>.mirror.aliyuncs.com/library/python:3.12.10-slim
+        #   - 直连官方 Docker Hub： python:3.12.10-slim
+        BASE_IMAGE: docker.m.daocloud.io/library/python:3.12.10-slim
+    image: docker-assistant:latest
     container_name: docker-assistant
     restart: unless-stopped
     ports:
-      - "${APP_PORT:-8000}:8000"
+      # 若 8000 端口冲突，改这一行的左侧
+      - "8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config:/app/config
       - ./data:/app/data
     environment:
-      - TZ=${TZ:-Asia/Shanghai}
+      # 若需改时区，改这一行
+      - TZ=Asia/Shanghai
       - CONFIG_DIR=/app/config
       - DATA_DIR=/app/data

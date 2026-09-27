@@ -1,7 +1,7 @@
-"""统一配置管理：自动创建 config.yaml，同时承载代理与容器更新器两部分配置。"""
+"""统一配置管理：首次启动自动生成 config.yaml，无需外部示例文件。"""
 
 import logging
-import shutil
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -13,14 +13,17 @@ from app import APP_NAME, APP_TAGLINE, __version__
 logger = logging.getLogger("dockerassistant.config")
 
 # 目录（可通过环境变量覆盖，便于容器挂载）
-import os
-
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/config"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 CONFIG_PATH = CONFIG_DIR / "config.yaml"
-CONFIG_EXAMPLE_PATH = CONFIG_DIR / "config.example.yaml"
 
-# 内置默认配置（供自动创建 config.yaml 使用）
+# ============================================================
+#  内置默认配置
+#
+#  首次启动时写入 CONFIG_DIR/config.yaml。
+#  用户后续通过 Web 后台或直接编辑该文件修改。
+#  删除 config.yaml 后重启，会重新生成本默认配置。
+# ============================================================
 DEFAULT_CONFIG_DICT: dict[str, Any] = {
     "app": {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__},
     "server": {"host": "0.0.0.0", "port": 8000, "debug": False},
@@ -86,7 +89,7 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
     },
     "logging": {
         "level": "INFO",
-        "file": "data/dockermirrorflow.log",
+        "file": "data/docker-assistant.log",
         "max_bytes": 10485760,
         "backup_count": 5,
         "third_party_level": "WARNING",
@@ -100,17 +103,20 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
         "timeout": 10.0,
         "upstreams": [],
     },
-    # ---------- 新增：容器更新器 ----------
+    # ---------- 容器更新 ----------
     "updater": {
         "enabled": True,
         "check_interval_minutes": 60,
         "check_concurrency": 2,
         "auto_update": False,
-        "mirrors": [
-            "https://docker.m.daocloud.io",
-            "https://docker.1panel.live",
-            "https://hub.rat.dev",
-        ],
+        # 检测镜像前是否等待镜像加速就绪
+        "wait_for_proxy_ready": True,
+        # 等待镜像加速的最长时间（分钟）
+        "proxy_ready_timeout_minutes": 15,
+        # 更新源列表：
+        #   "local"    → 内置镜像加速代理（http://127.0.0.1:<server.port>），默认
+        #   其他字符串  → 自定义加速源 URL
+        "mirrors": ["local"],
         "use_direct": True,
         "pull_use_mirror": True,
         "registry_username": "",
@@ -121,6 +127,31 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
         "containers": {},
     },
 }
+
+# 写入 config.yaml 时附加的头部说明（仅首次生成时写入，不影响解析）
+_CONFIG_FILE_HEADER = """\
+# ============================================================
+#  Docker-Assistant 配置文件  v1.0.0
+#  镜像加速 · 容器更新  —— 一体化管理平台
+#
+#  本文件由程序首次启动时自动生成，可直接编辑或通过 Web 后台修改。
+#  Web 后台：打开「配置文件」按钮 → 修改 → 保存并重载。
+#
+#  ────────────────────────────────────────────────────────────
+#  生效说明
+#  ────────────────────────────────────────────────────────────
+#    立即生效（Web 保存后自动重载）：
+#      admin.*、proxy.*、access.*、custom_nodes、manually_disabled、
+#      route_aliases、search.*、speed_test.*、updater.*（除 interval）
+#
+#    需要重启服务：
+#      server.*、logging.*
+#      auto_fetch.interval_minutes / health_check.interval_minutes /
+#      speed_test.interval_minutes / updater.check_interval_minutes
+# ============================================================
+
+
+"""
 
 
 # ============================================================
@@ -295,17 +326,21 @@ class SearchConfig(BaseModel):
 
 
 class UpdaterConfig(BaseModel):
-    """容器更新器配置（从 DockerImageUpdater 合并而来）。"""
+    """容器更新配置（融合于加速节点配置体系内）。"""
 
     enabled: bool = True
     check_interval_minutes: int = 60
     check_concurrency: int = 2
     auto_update: bool = False
-    mirrors: list[str] = [
-        "https://docker.m.daocloud.io",
-        "https://docker.1panel.live",
-        "https://hub.rat.dev",
-    ]
+
+    # 检测镜像前是否等待镜像加速就绪
+    wait_for_proxy_ready: bool = True
+    proxy_ready_timeout_minutes: int = 15
+
+    # 更新源列表：
+    #   "local"    → 内置镜像加速代理（http://127.0.0.1:<server.port>）
+    #   其他字符串  → 自定义加速源 URL
+    mirrors: list[str] = ["local"]
     use_direct: bool = True
     pull_use_mirror: bool = True
     registry_username: str = ""
@@ -313,7 +348,6 @@ class UpdaterConfig(BaseModel):
     log_max_entries: int = 5000
     log_retention_days: int = 7
     log_display_level: str = "INFO"
-    # container_name -> {"strategy": "track"|"latest"|"pin", "target_tag": "..."}
     containers: dict[str, dict[str, str]] = {}
 
     @field_validator("mirrors", mode="before")
@@ -362,28 +396,23 @@ class AppConfig(BaseModel):
 def ensure_config_exists() -> bool:
     """
     确保 CONFIG_DIR/config.yaml 存在。
-    首次启动时按以下顺序尝试创建：
-      1. 若 CONFIG_DIR/config.example.yaml 存在 → 复制它
-      2. 否则 → 写入内置默认配置
-    返回 True 表示是本次新建的。
+
+    首次启动（或 config.yaml 被删除）时，直接使用内置的
+    DEFAULT_CONFIG_DICT 写入完整默认配置，不再依赖外部示例文件。
+
+    返回 True 表示本次新建。
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     if CONFIG_PATH.exists():
         return False
 
-    logger.info(f"未发现 {CONFIG_PATH}，正在自动创建...")
-
-    if CONFIG_EXAMPLE_PATH.exists():
-        try:
-            shutil.copy2(CONFIG_EXAMPLE_PATH, CONFIG_PATH)
-            logger.info(f"已从 {CONFIG_EXAMPLE_PATH} 复制生成 config.yaml")
-            return True
-        except Exception as e:
-            logger.warning(f"复制 example 失败，改用内置默认配置：{e}")
+    logger.info(f"未发现 {CONFIG_PATH}，正在使用内置默认配置创建...")
 
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            # 先写说明头，再写 YAML 内容
+            f.write(_CONFIG_FILE_HEADER)
             yaml.dump(
                 DEFAULT_CONFIG_DICT,
                 f,
@@ -391,7 +420,7 @@ def ensure_config_exists() -> bool:
                 sort_keys=False,
                 default_flow_style=False,
             )
-        logger.info(f"已写入内置默认配置到 {CONFIG_PATH}")
+        logger.info(f"已生成默认配置到 {CONFIG_PATH}")
         return True
     except Exception as e:
         raise RuntimeError(f"无法创建配置文件 {CONFIG_PATH}: {e}") from e
@@ -439,6 +468,7 @@ def save_config(path: Path = CONFIG_PATH) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".yaml.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
+        f.write(_CONFIG_FILE_HEADER)
         yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
     tmp.replace(path)
 

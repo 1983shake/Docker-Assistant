@@ -1,19 +1,26 @@
-"""容器更新器核心逻辑（合并自 DockerImageUpdater/main.py）。"""
+"""容器更新核心逻辑。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
+from sqlmodel import Session, select
 
-from app.config import DATA_DIR, config, save_config
+from app.config import DATA_DIR, config
+from app.database import engine
+from app.models import ProxyNode
+from app.services import progress
 from app.services.docker_service import docker_service
 from app.services.log_handler import log_handler
 from app.services.registry_client import get_remote_digests_multi, parse_image_reference
+
+logger = logging.getLogger("dockerassistant.updater")
 
 STATE_FILE = DATA_DIR / "updater_results.json"
 
@@ -26,10 +33,194 @@ check_in_progress: bool = False
 container_checking: Dict[str, bool] = {}
 
 
-# --------------------------------------------------------------------------- #
+# ============================================================
+#  registry 类型判断：决定「走节点路由」还是「直连」
+# ============================================================
+
+# 已知 registry 类型 → 内置路由前缀
+#   这些类型的镜像，代理节点已配置好路由，检测/拉取时优先走 local
+_KNOWN_REGISTRY_PREFIXES: Dict[str, str] = {
+    "registry-1.docker.io": "dockerhub",
+    "docker.io": "dockerhub",
+    "index.docker.io": "dockerhub",
+    "ghcr.io": "ghcr",
+    "gcr.io": "gcr",
+    "k8s.gcr.io": "gcr",
+    "registry.k8s.io": "gcr",
+    "quay.io": "quay",
+    "mcr.microsoft.com": "mcr",
+    "nvcr.io": "nvcr",
+    "docker.elastic.co": "elastic",
+}
+
+
+def _detect_registry_type(image_ref: str) -> Optional[str]:
+    """
+    判断镜像属于哪种已知 registry 类型。
+
+    返回：
+      - "dockerhub" / "ghcr" / "gcr" / "quay" / "mcr" / "nvcr" / "elastic"
+      - None：未知（自定义 / 私有 registry）
+    """
+    try:
+        registry, _, _ = parse_image_reference(image_ref)
+    except Exception:
+        return None
+
+    if not registry:
+        return None
+
+    return _KNOWN_REGISTRY_PREFIXES.get(registry.lower())
+
+
+def _resolve_check_source(image_ref: str) -> Tuple[List[str], bool, str]:
+    """
+    根据镜像的 registry 类型，决定检测源。
+
+    返回 (mirrors, use_direct, reason)：
+      - mirrors:    传给 get_remote_digests_multi 的镜像源列表
+      - use_direct: 是否启用直连回退
+      - reason:     日志说明
+
+    策略：
+      1. 有路由的 registry（Docker Hub / GHCR / GCR / Quay / MCR / Elastic / NVCR）
+         → 优先走内置 local 节点路由；节点不可用时回退直连（受 use_direct 控制）
+
+      2. 无路由的 registry（自定义 / 私有）
+         → 直接走直连，不使用任何加速源
+    """
+    registry_type = _detect_registry_type(image_ref)
+    raw_mirrors = [m.strip() for m in (config.updater.mirrors or []) if (m or "").strip()]
+
+    if registry_type is not None:
+        # ---- 有路由：优先走节点路由 ----
+        # 保证 "local" 在列表首位
+        prioritized: List[str] = []
+        if "local" in raw_mirrors:
+            prioritized.append("local")
+        for m in raw_mirrors:
+            if m != "local":
+                prioritized.append(m)
+        if not prioritized:
+            prioritized = ["local"]
+
+        use_direct = bool(config.updater.use_direct)
+        reason = f"已知 registry [{registry_type}]，走节点路由"
+        logger.info("[检测策略] %s → %s（mirrors=%s, use_direct=%s）", image_ref, reason, prioritized, use_direct)
+        return prioritized, use_direct, reason
+
+    # ---- 无路由：直接直连 ----
+    reason = "未知 registry，直接使用直连"
+    logger.info("[检测策略] %s → %s", image_ref, reason)
+    return [], True, reason
+
+
+def _expand_mirrors_for_check(mirrors: List[str]) -> List[str]:
+    """检查阶段：把 'local' 展开为内置代理地址。"""
+    local_url = f"http://127.0.0.1:{config.server.port}"
+    out: List[str] = []
+    for m in mirrors or []:
+        m = (m or "").strip()
+        if not m:
+            continue
+        if m == "local":
+            out.append(local_url)
+        else:
+            out.append(m)
+    return out
+
+
+def _expand_mirrors_for_pull(mirrors: List[str]) -> List[str]:
+    """拉取阶段：跳过 'local'（daemon 无法回连容器内部）。"""
+    out: List[str] = []
+    for m in mirrors or []:
+        m = (m or "").strip()
+        if not m or m == "local":
+            continue
+        out.append(m)
+    return out
+
+
+# ============================================================
+#  镜像加速就绪判断
+# ============================================================
+def _has_available_proxy() -> bool:
+    try:
+        with Session(engine) as session:
+            node = session.exec(
+                select(ProxyNode)
+                .where(ProxyNode.enabled == True)  # noqa: E712
+                .where(ProxyNode.manually_disabled == False)  # noqa: E712
+                .where(ProxyNode.latency < config.health_check.disable_threshold)
+            ).first()
+            return node is not None
+    except Exception:
+        return False
+
+
+# ============================================================
+#  容器状态统计（供主页顶栏展示）
+# ============================================================
+def get_container_summary() -> Dict[str, int]:
+    """
+    返回容器状态统计：
+      - total:      容器总数（含自身容器）
+      - updatable:  有更新且无错误的容器数
+      - error:      检测出错的容器数
+      - checking:   正在检测的容器数
+    """
+    total = len(check_results)
+    updatable = 0
+    error = 0
+    for r in check_results.values():
+        if r.get("error"):
+            error += 1
+        elif r.get("update_available"):
+            updatable += 1
+    return {
+        "total": total,
+        "updatable": updatable,
+        "error": error,
+        "checking": sum(1 for v in container_checking.values() if v),
+    }
+
+
+# ============================================================
+#  启动时判断
+# ============================================================
+def should_run_check() -> bool:
+    interval_minutes = max(5, int(config.updater.check_interval_minutes or 60))
+
+    if not last_check_time:
+        logger.info("[startup] 未找到容器检测记录，触发首次容器检测")
+        return True
+
+    try:
+        last_dt = datetime.fromisoformat(last_check_time)
+    except Exception as e:
+        logger.warning(f"[startup] last_check_time 解析失败（{last_check_time}）：{e}，触发容器检测")
+        return True
+
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone(timedelta(hours=8)))
+
+    now = datetime.now(timezone(timedelta(hours=8)))
+    try:
+        elapsed_minutes = (now - last_dt).total_seconds() / 60
+    except Exception:
+        return True
+
+    logger.info(f"[startup] 上次容器检测：{last_check_time}，" f"距现在 {elapsed_minutes:.1f} 分钟，周期 {interval_minutes} 分钟")
+    return elapsed_minutes >= interval_minutes
+
+
+# ============================================================
+#  状态持久化
+# ============================================================
 def _load_state() -> None:
     global last_check_time
     if not STATE_FILE.exists():
+        logger.info("[startup] 未发现容器检测状态文件，视作首次检测")
         return
     try:
         with STATE_FILE.open("r", encoding="utf-8") as f:
@@ -43,8 +234,9 @@ def _load_state() -> None:
             for k, v in res.items():
                 if isinstance(v, dict):
                     check_results[k] = v
-    except Exception:
-        pass
+        logger.info(f"[startup] 已恢复容器检测状态（last_check={last_check_time}，{len(check_results)} 条记录）")
+    except Exception as e:
+        logger.warning(f"[startup] 读取容器检测状态失败: {e}")
 
 
 def _save_state() -> None:
@@ -62,6 +254,9 @@ def _save_state() -> None:
         pass
 
 
+# ============================================================
+#  辅助
+# ============================================================
 def _short_digest(d: Optional[str]) -> str:
     if not d:
         return "-"
@@ -87,17 +282,15 @@ def _target_reference(current_image: str, entry: Dict[str, Any]) -> str:
     return f"{base}:{current_tag}"
 
 
-# --------------------------------------------------------------------------- #
+# ============================================================
+#  单容器检测
+# ============================================================
 async def check_one(
     container: Dict[str, Any],
     cfg,
     slot: Optional[int] = None,
     manual: bool = False,
 ) -> Dict[str, Any]:
-    import logging
-
-    logger = logging.getLogger("dockerassistant.updater")
-
     name = container["name"]
     prefix = "[手动]" if manual else (f"[C{slot}]" if slot else "")
 
@@ -135,14 +328,18 @@ async def check_one(
         local_digest = await loop.run_in_executor(None, docker_service.get_local_digest, target_ref)
         result["local_digest"] = local_digest
 
+        # ---- 根据 registry 类型决定检测源 ----
+        raw_mirrors, use_direct, reason = _resolve_check_source(target_ref)
+        mirrors_for_check = _expand_mirrors_for_check(raw_mirrors)
+
         remote_digest, source = await loop.run_in_executor(
             None,
             lambda: get_remote_digests_multi(
                 target_ref,
-                cfg.updater.mirrors or [],
+                mirrors_for_check,
                 (cfg.updater.registry_username or "").strip() or None,
                 (cfg.updater.registry_password or "").strip() or None,
-                bool(cfg.updater.use_direct),
+                use_direct,
             ),
         )
         result["remote_digest"] = remote_digest
@@ -164,12 +361,13 @@ async def check_one(
             logger.warning("%s[%s] 检查失败：%s", prefix, name, result["error"])
         elif result.get("update_available"):
             logger.info(
-                "%s[%s] 发现新版本 %s -> %s (%s)",
+                "%s[%s] 发现新版本 %s -> %s (%s) [%s]",
                 prefix,
                 name,
                 _short_digest(local_digest),
                 _short_digest(remote_digest),
                 source or "direct",
+                reason,
             )
         elif result.get("note"):
             logger.info("%s[%s] %s", prefix, name, result["note"])
@@ -182,31 +380,82 @@ async def check_one(
     return result
 
 
+# ============================================================
+#  全容器检测
+# ============================================================
 async def run_check_all() -> List[Dict[str, Any]]:
     global last_check_time, check_in_progress
-    import logging
-
-    logger = logging.getLogger("dockerassistant.updater")
 
     async with state_lock:
         check_in_progress = True
         try:
+            # 等待镜像加速就绪
+            if config.updater.wait_for_proxy_ready:
+                if not _has_available_proxy():
+                    wait_total = max(1, int(config.updater.proxy_ready_timeout_minutes or 15))
+                    logger.info("[容器检测] 镜像加速尚未就绪，最多等待 %d 分钟…", wait_total)
+                    progress.start(
+                        "updater_wait",
+                        "等待镜像加速",
+                        total=wait_total * 60,
+                        message="等待节点检测完成…",
+                    )
+                    deadline = time.time() + wait_total * 60
+                    ok = False
+                    start_ts = time.time()
+                    while time.time() < deadline:
+                        if _has_available_proxy():
+                            ok = True
+                            break
+                        elapsed = int(time.time() - start_ts)
+                        progress.update(
+                            "updater_wait",
+                            done=min(elapsed, wait_total * 60),
+                            message=f"已等待 {elapsed}s / {wait_total * 60}s",
+                        )
+                        await asyncio.sleep(5)
+
+                    if ok:
+                        elapsed = int(time.time() - start_ts)
+                        logger.info("[容器检测] 镜像加速已就绪（等待 %ds），开始容器检测", elapsed)
+                        progress.finish("updater_wait", f"就绪（等待 {elapsed}s）")
+                    else:
+                        logger.warning("[容器检测] 等待镜像加速超时（%d 分钟），仍继续执行容器检测", wait_total)
+                        progress.finish("updater_wait", "超时，继续执行")
+                else:
+                    logger.info("[容器检测] 镜像加速已就绪，开始容器检测")
+
             cfg = config
             concurrency = max(1, min(int(cfg.updater.check_concurrency or 2), 20))
             loop = asyncio.get_running_loop()
             containers = await loop.run_in_executor(None, docker_service.list_containers)
             logger.info("开始检查容器，共 %d 个（并发 %d）", len(containers), concurrency)
 
+            progress.start(
+                "updater_check",
+                "容器检测",
+                total=len(containers),
+                message=f"共 {len(containers)} 个容器",
+            )
+
             slots: "asyncio.Queue[int]" = asyncio.Queue()
             for i in range(1, concurrency + 1):
                 slots.put_nowait(i)
 
+            done_count = 0
+            progress_lock = asyncio.Lock()
+
             async def _do(c: Dict[str, Any]) -> Dict[str, Any]:
+                nonlocal done_count
                 slot = await slots.get()
                 try:
-                    return await check_one(c, cfg, slot=slot)
+                    r = await check_one(c, cfg, slot=slot)
                 finally:
                     slots.put_nowait(slot)
+                    async with progress_lock:
+                        done_count += 1
+                        progress.update("updater_check", done=done_count)
+                return r
 
             results = list(await asyncio.gather(*[_do(c) for c in containers]))
 
@@ -217,7 +466,14 @@ async def run_check_all() -> List[Dict[str, Any]]:
             _save_state()
 
             updatable = sum(1 for r in results if r.get("update_available") and not r.get("error"))
-            logger.info("检查完成：%d 个容器，%d 个可更新", len(results), updatable)
+            err_count = sum(1 for r in results if r.get("error"))
+            logger.info(
+                "检查完成：%d 个容器，%d 个可更新，%d 个出错",
+                len(results),
+                updatable,
+                err_count,
+            )
+            progress.finish("updater_check", f"完成，{updatable} 个可更新")
 
             if cfg.updater.auto_update:
                 for r in results:
@@ -233,12 +489,10 @@ async def run_check_all() -> List[Dict[str, Any]]:
             check_in_progress = False
 
 
-# --------------------------------------------------------------------------- #
+# ============================================================
+#  容器更新
+# ============================================================
 async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
-    import logging
-
-    logger = logging.getLogger("dockerassistant.updater")
-
     if container_name in running_updates:
         raise HTTPException(status_code=409, detail=f"{container_name} 正在更新中")
 
@@ -246,6 +500,7 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
     entry = (cfg.updater.containers or {}).get(container_name) or {}
 
     running_updates[container_name] = "pulling"
+    progress.start(f"upd_pull:{container_name}", f"更新 {container_name}", message="拉取镜像…")
     logger.info("[%s] 开始更新流程", container_name)
     try:
         loop = asyncio.get_running_loop()
@@ -255,14 +510,22 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
             current_image = container.attrs["Config"]["Image"]
             target = _target_reference(current_image, entry)
 
+            # ---- 根据 registry 类型决定拉取源 ----
+            raw_mirrors, _use_direct, reason = _resolve_check_source(target)
             pull_use_mirror = bool(cfg.updater.pull_use_mirror)
-            mirrors = (cfg.updater.mirrors or []) if pull_use_mirror else []
+
+            if pull_use_mirror:
+                # 拉取阶段跳过 'local'（daemon 无法回连容器内部）
+                mirrors = _expand_mirrors_for_pull(raw_mirrors)
+            else:
+                mirrors = []
 
             running_updates[container_name] = "pulling"
             logger.info(
-                "[%s] 拉取镜像 %s（镜像加速源：%s）",
+                "[%s] 拉取镜像 %s（策略：%s；加速源：%s）",
                 container_name,
                 target,
+                reason,
                 "启用" if pull_use_mirror and mirrors else "未使用",
             )
             image_ref, source = docker_service.pull_image(
@@ -272,6 +535,7 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
             )
 
             running_updates[container_name] = "recreating"
+            progress.update(f"upd_pull:{container_name}", message="重建容器…")
             logger.info("[%s] 重建容器（镜像 %s，来源 %s）", container_name, image_ref, source)
             info = docker_service.recreate_container(container, image_ref)
             info["source"] = source
@@ -280,18 +544,17 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
 
         result = await loop.run_in_executor(None, _work)
         logger.info("[%s] 更新完成", container_name)
+        progress.finish(f"upd_pull:{container_name}", "更新完成")
         return result
     except Exception:
         logger.exception("[%s] 更新失败", container_name)
+        progress.finish(f"upd_pull:{container_name}", "更新失败")
         raise
     finally:
         running_updates.pop(container_name, None)
 
 
 async def _refresh_one(name: str) -> None:
-    import logging
-
-    logger = logging.getLogger("dockerassistant.updater")
     try:
         cfg = config
         loop = asyncio.get_running_loop()
@@ -306,9 +569,6 @@ async def _refresh_one(name: str) -> None:
 
 
 async def run_log_cleanup() -> None:
-    import logging
-
-    logger = logging.getLogger("dockerassistant.updater")
     try:
         retention = int(config.updater.log_retention_days or 7)
         max_entries = int(config.updater.log_max_entries or 5000)

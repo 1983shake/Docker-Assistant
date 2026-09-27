@@ -1,9 +1,9 @@
-"""容器更新器：API + 独立 Web UI 页面。"""
+"""容器更新：API（页面已融合进主页）。"""
 
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from app import APP_NAME, APP_TAGLINE, __version__
@@ -13,29 +13,13 @@ from app.services.docker_service import docker_service
 from app.services.log_handler import log_handler
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
 
 
-# ============================================================
-#  Web UI
-# ============================================================
-@router.get("/updater", response_class=HTMLResponse)
-async def updater_page(request: Request):
-    return templates.TemplateResponse(
-        request,
-        "updater.html",
-        {
-            "app_name": config.app.name,
-            "app_tagline": config.app.tagline,
-            "app_version": __version__,
-            "current_year": datetime.now().year,
-        },
-    )
+@router.get("/updater")
+async def updater_page():
+    return RedirectResponse(url="/?view=containers", status_code=307)
 
 
-# ============================================================
-#  元信息 / 健康检查
-# ============================================================
 @router.get("/api/updater/meta")
 async def api_meta():
     return {
@@ -55,7 +39,6 @@ async def api_health():
 
 @router.get("/api/system/health")
 async def api_system_health():
-    """给 Docker HEALTHCHECK 用的极简探针。"""
     return {"status": "ok"}
 
 
@@ -97,7 +80,6 @@ async def api_containers():
 
 @router.post("/api/updater/containers/{name}/check")
 async def api_check_one(name: str):
-    """单容器手动检测。"""
     if updater_service.container_checking.get(name):
         raise HTTPException(status_code=409, detail=f"{name} 正在检测中")
 
@@ -175,8 +157,7 @@ async def api_images():
     import asyncio
 
     loop = asyncio.get_running_loop()
-    images = await loop.run_in_executor(None, docker_service.list_images)
-    return images
+    return await loop.run_in_executor(None, docker_service.list_images)
 
 
 @router.delete("/api/updater/images")
@@ -211,9 +192,13 @@ async def api_prune_images():
 #  设置
 # ============================================================
 class UpdaterSettingsPayload(BaseModel):
+    enabled: bool = True
     check_interval_minutes: int = Field(60, ge=5, le=10080)
     check_concurrency: int = Field(2, ge=1, le=20)
     auto_update: bool = False
+    # 【新增】等待镜像加速就绪
+    wait_for_proxy_ready: bool = True
+    proxy_ready_timeout_minutes: int = Field(15, ge=1, le=180)
     mirrors: list[str] = []
     use_direct: bool = True
     pull_use_mirror: bool = True
@@ -227,9 +212,12 @@ class UpdaterSettingsPayload(BaseModel):
 async def api_get_settings():
     u = config.updater
     return {
+        "enabled": u.enabled,
         "check_interval_minutes": u.check_interval_minutes,
         "check_concurrency": u.check_concurrency,
         "auto_update": u.auto_update,
+        "wait_for_proxy_ready": u.wait_for_proxy_ready,
+        "proxy_ready_timeout_minutes": u.proxy_ready_timeout_minutes,
         "mirrors": u.mirrors,
         "use_direct": u.use_direct,
         "pull_use_mirror": u.pull_use_mirror,
@@ -244,9 +232,12 @@ async def api_get_settings():
 @router.put("/api/updater/settings")
 async def api_put_settings(payload: UpdaterSettingsPayload):
     u = config.updater
+    u.enabled = payload.enabled
     u.check_interval_minutes = payload.check_interval_minutes
     u.check_concurrency = payload.check_concurrency
     u.auto_update = payload.auto_update
+    u.wait_for_proxy_ready = payload.wait_for_proxy_ready
+    u.proxy_ready_timeout_minutes = payload.proxy_ready_timeout_minutes
     u.mirrors = [m.strip() for m in payload.mirrors if m.strip()]
     u.use_direct = payload.use_direct
     u.pull_use_mirror = payload.pull_use_mirror

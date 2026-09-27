@@ -5,7 +5,6 @@
 **/.idea
 **/.vscode
 data/
-config/config.yaml
-config/*.bak
+config/
 .env
 *.log

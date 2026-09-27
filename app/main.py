@@ -1,4 +1,4 @@
-"""Docker-Assistant 统一入口：镜像加速 + 容器更新器。"""
+"""Docker-Assistant 统一入口：镜像加速 + 容器更新。"""
 
 import asyncio
 import logging
@@ -15,9 +15,8 @@ from app.config import config
 from app.database import create_db_and_tables, engine, upgrade_db
 from app.models import ProxyNode
 from app.routers import docker_proxy, updater, web_ui
-from app.services import proxy_manager
+from app.services import proxy_manager, updater_service
 from app.services.log_handler import log_handler
-from app.services import updater_service
 
 # ========== 日志配置 ==========
 handlers = [logging.StreamHandler()]
@@ -40,9 +39,12 @@ logging.basicConfig(
     handlers=handlers,
 )
 
+# 把内存环形缓冲 log_handler 挂到 root logger（运行日志标签页用）
+logging.getLogger().addHandler(log_handler)
+
 
 class _AccessLogFilter(logging.Filter):
-    _SUPPRESS_PATHS = ("/api/tasks/status", "/api/updater/containers")
+    _SUPPRESS_PATHS = ("/api/tasks/status", "/api/updater/containers", "/api/updater/results")
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -52,7 +54,11 @@ class _AccessLogFilter(logging.Filter):
         return not any(p in msg for p in self._SUPPRESS_PATHS)
 
 
-_third_level = getattr(logging, str(config.logging.third_party_level).upper(), logging.WARNING)
+_third_level = getattr(
+    logging,
+    str(config.logging.third_party_level).upper(),
+    logging.WARNING,
+)
 for _noisy_logger in ("httpx", "httpcore", "apscheduler", "uvicorn.access"):
     logging.getLogger(_noisy_logger).setLevel(_third_level)
 logging.getLogger("uvicorn.access").addFilter(_AccessLogFilter())
@@ -69,8 +75,17 @@ def _get_node_count() -> int:
 
 
 async def _background_startup():
-    """后台执行首次拉取、在线检测、速度测试，不阻塞 Web 页面启动。"""
+    """
+    后台执行首次拉取、在线检测、速度测试、容器检测，不阻塞 Web 页面启动。
+
+    所有初始任务都按各自周期判断，未超过周期则跳过：
+      - 节点拉取：数据库为空时才拉取
+      - 在线检测：should_run_health_check()
+      - 速度测试：should_run_speed_test()
+      - 容器检测：should_run_check()
+    """
     try:
+        # ---------- 首次节点拉取（仅数据库为空时） ----------
         node_count = _get_node_count()
         if node_count == 0:
             if config.auto_fetch.enabled:
@@ -85,28 +100,42 @@ async def _background_startup():
         else:
             logger.info(f"数据库已有 {node_count} 个节点，跳过首次拉取")
 
-        logger.info("执行初始在线检测...")
-        try:
-            await proxy_manager.run_health_check()
-        except Exception as e:
-            logger.error(f"初始在线检测失败: {e}")
-
-        if config.speed_test.enabled:
-            logger.info("执行初始速度测试...")
+        # ---------- 初始在线检测 ----------
+        if proxy_manager.should_run_health_check():
+            logger.info("满足检测条件，执行在线检测...")
             try:
-                await proxy_manager.run_speed_test()
+                await proxy_manager.run_health_check()
             except Exception as e:
-                logger.error(f"初始速度测试失败: {e}")
+                logger.error(f"在线检测失败: {e}")
+        else:
+            logger.info(f"距上次在线检测未超过 {config.health_check.interval_minutes} 分钟，跳过初始检测")
+
+        # ---------- 初始速度测试 ----------
+        if config.speed_test.enabled:
+            if proxy_manager.should_run_speed_test():
+                logger.info("满足测速条件，执行速度测试...")
+                try:
+                    await proxy_manager.run_speed_test()
+                except Exception as e:
+                    logger.error(f"速度测试失败: {e}")
+            else:
+                logger.info(f"距上次速度测试未超过 {config.speed_test.interval_minutes} 分钟，跳过初始速度测试")
         else:
             logger.info("速度测试已禁用，跳过初始速度测试")
 
-        # 触发一次容器检查（如果更新器启用）
+        # ---------- 初始容器检测（按上次检测时间判断） ----------
         if config.updater.enabled:
-            try:
-                logger.info("执行初始容器检查...")
-                await updater_service.run_check_all()
-            except Exception as e:
-                logger.error(f"初始容器检查失败: {e}")
+            if updater_service.should_run_check():
+                logger.info("满足检测条件，执行初始容器检查...")
+                try:
+                    await updater_service.run_check_all()
+                except Exception as e:
+                    logger.error(f"初始容器检查失败: {e}")
+            else:
+                logger.info(f"距上次容器检测未超过 {config.updater.check_interval_minutes} 分钟，跳过初始容器检查")
+        else:
+            logger.info("容器更新已禁用，跳过初始容器检查")
+
     except asyncio.CancelledError:
         logger.info("后台初始化任务被取消")
         raise
@@ -131,10 +160,16 @@ async def lifespan(app: FastAPI):
     logger.info("加载配置中的自定义节点...")
     proxy_manager.init_proxies()
 
-    # 3. 启动定时任务调度器
+    # 3. 恢复容器检测状态（last_check_time + 上次检测结果）
+    logger.info("恢复容器检测状态...")
+    try:
+        updater_service._load_state()
+    except Exception as e:
+        logger.warning(f"恢复容器检测状态失败: {e}")
+
+    # 4. 启动定时任务调度器
     logger.info("启动定时任务调度器...")
 
-    # 3.1 镜像代理任务
     if config.auto_fetch.enabled:
         scheduler.add_job(
             proxy_manager.fetch_and_update_proxies,
@@ -166,7 +201,6 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
 
-    # 3.2 容器更新器任务
     if config.updater.enabled:
         scheduler.add_job(
             updater_service.run_check_all,
@@ -185,13 +219,12 @@ async def lifespan(app: FastAPI):
 
     scheduler.start()
 
-    # 4. 后台执行初始化（不阻塞服务启动）
+    # 5. 后台执行初始化（不阻塞服务启动）
     _bg_task = asyncio.create_task(_background_startup())
 
     logger.info("服务已就绪，Web 页面可访问")
-    logger.info("  - 镜像加速 UI:    http://<host>:8000/")
-    logger.info("  - 容器更新器 UI:  http://<host>:8000/updater")
-    logger.info("  - 代理入口:       http://<host>:8000/v2/")
+    logger.info("  - 主页:  http://<host>:%d/", config.server.port)
+    logger.info("  - 代理:  http://<host>:%d/v2/", config.server.port)
 
     yield
 
