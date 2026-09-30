@@ -128,11 +128,6 @@ async def api_update(name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 说明：
-    #   更新后的「版本检测」已在 perform_update 内部同步 await 完成，
-    #   此处不再重复触发后台任务，避免与前端刷新产生竞态。
-    #   取消场景下 perform_update 会返回 cancelled=True，且不会写 check_results，
-    #   保持原有的检测结果不变。
     return {"ok": True, "result": result}
 
 
@@ -167,10 +162,19 @@ async def api_put_policy(name: str, payload: ContainerPolicyPayload):
 # ============================================================
 @router.get("/api/updater/images")
 async def api_images():
+    """列出本地镜像。
+
+    会把形如 "127.0.0.1:8000/xxx" 的代理前缀标签剥离后再返回，
+    保证前端展示的都是规范的镜像名。
+    """
     import asyncio
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, docker_service.list_images)
+    prefixes = updater_service.get_local_mirror_prefixes()
+    return await loop.run_in_executor(
+        None,
+        lambda: docker_service.list_images(mirror_prefixes=prefixes),
+    )
 
 
 @router.delete("/api/updater/images")
@@ -214,6 +218,23 @@ async def api_prune_unused_images():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/api/updater/images/cleanup-mirror-tags")
+async def api_cleanup_mirror_tags():
+    """清理所有镜像上形如 "127.0.0.1:8000/xxx" 的代理前缀标签。
+
+    - 只删除前缀 tag，镜像本体保留（由原始 tag 继续引用）。
+    - 若某镜像**只有**前缀 tag，跳过不删，避免误删镜像本体。
+    - 返回 {ok, removed, failed, skipped}。
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, updater_service.cleanup_mirror_tags)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================
 #  设置
 # ============================================================
@@ -222,7 +243,6 @@ class UpdaterSettingsPayload(BaseModel):
     check_interval_minutes: int = Field(60, ge=5, le=10080)
     check_concurrency: int = Field(2, ge=1, le=20)
     auto_update: bool = False
-    # 【新增】等待镜像加速就绪
     wait_for_proxy_ready: bool = True
     proxy_ready_timeout_minutes: int = Field(15, ge=1, le=180)
     mirrors: list[str] = []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,11 +38,9 @@ cancel_requested: Dict[str, bool] = {}
 
 
 # ============================================================
-#  registry 类型判断：决定「走节点路由」还是「直连」
+#  registry 类型判断
 # ============================================================
 
-# 已知 registry 类型 → 内置路由前缀
-#   这些类型的镜像，代理节点已配置好路由，检测/拉取时优先走 local
 _KNOWN_REGISTRY_PREFIXES: Dict[str, str] = {
     "registry-1.docker.io": "dockerhub",
     "docker.io": "dockerhub",
@@ -58,13 +57,6 @@ _KNOWN_REGISTRY_PREFIXES: Dict[str, str] = {
 
 
 def _detect_registry_type(image_ref: str) -> Optional[str]:
-    """
-    判断镜像属于哪种已知 registry 类型。
-
-    返回：
-      - "dockerhub" / "ghcr" / "gcr" / "quay" / "mcr" / "nvcr" / "elastic"
-      - None：未知（自定义 / 私有 registry）
-    """
     try:
         registry, _, _ = parse_image_reference(image_ref)
     except Exception:
@@ -77,27 +69,10 @@ def _detect_registry_type(image_ref: str) -> Optional[str]:
 
 
 def _resolve_check_source(image_ref: str) -> Tuple[List[str], bool, str]:
-    """
-    根据镜像的 registry 类型，决定检测源。
-
-    返回 (mirrors, use_direct, reason)：
-      - mirrors:    传给 get_remote_digests_multi 的镜像源列表
-      - use_direct: 是否启用直连回退
-      - reason:     日志说明
-
-    策略：
-      1. 有路由的 registry（Docker Hub / GHCR / GCR / Quay / MCR / Elastic / NVCR）
-         → 优先走内置 local 节点路由；节点不可用时回退直连（受 use_direct 控制）
-
-      2. 无路由的 registry（自定义 / 私有）
-         → 直接走直连，不使用任何加速源
-    """
     registry_type = _detect_registry_type(image_ref)
     raw_mirrors = [m.strip() for m in (config.updater.mirrors or []) if (m or "").strip()]
 
     if registry_type is not None:
-        # ---- 有路由：优先走节点路由 ----
-        # 保证 "local" 在列表首位
         prioritized: List[str] = []
         if "local" in raw_mirrors:
             prioritized.append("local")
@@ -112,7 +87,6 @@ def _resolve_check_source(image_ref: str) -> Tuple[List[str], bool, str]:
         logger.info("[检测策略] %s → %s（mirrors=%s, use_direct=%s）", image_ref, reason, prioritized, use_direct)
         return prioritized, use_direct, reason
 
-    # ---- 无路由：直接直连 ----
     reason = "未知 registry，直接使用直连"
     logger.info("[检测策略] %s → %s", image_ref, reason)
     return [], True, reason
@@ -133,15 +107,90 @@ def _expand_mirrors_for_check(mirrors: List[str]) -> List[str]:
     return out
 
 
+# ============================================================
+#  拉取阶段：本代理在 daemon 视角下的可达地址
+# ============================================================
+def _resolve_local_mirror_for_daemon() -> str:
+    """计算 daemon 视角下本代理的可达 host:port（不含协议）。"""
+    explicit = (getattr(config.updater, "local_mirror_url", "") or "").strip()
+    if explicit:
+        return re.sub(r"^https?://", "", explicit).rstrip("/")
+
+    host = (config.server.host or "").strip()
+    port = int(config.server.port or 8000)
+
+    if not host or host in ("0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+
+    host = re.sub(r"^https?://", "", host).rstrip("/")
+
+    if ":" in host and not host.startswith("["):
+        return host
+
+    return f"{host}:{port}"
+
+
 def _expand_mirrors_for_pull(mirrors: List[str]) -> List[str]:
-    """拉取阶段：跳过 'local'（daemon 无法回连容器内部）。"""
+    """拉取阶段：把 'local' 展开为 daemon 视角下本代理的 host:port。"""
     out: List[str] = []
     for m in mirrors or []:
         m = (m or "").strip()
-        if not m or m == "local":
+        if not m:
             continue
-        out.append(m)
+        if m == "local":
+            local = _resolve_local_mirror_for_daemon()
+            if local:
+                out.append(local)
+        else:
+            out.append(m)
     return out
+
+
+# ============================================================
+#  代理前缀标签：收集 + 清理
+# ============================================================
+def get_local_mirror_prefixes() -> List[str]:
+    """返回所有可能作为本代理前缀的 host:port 列表。
+
+    用于：
+      1) list_images 显示层剥离（避免暴露内部地址）
+      2) cleanup_mirror_tags 一次性清理历史遗留 tag
+    """
+    prefixes: List[str] = []
+
+    local = _resolve_local_mirror_for_daemon()
+    if local:
+        prefixes.append(local)
+
+    # 常见默认端口，防止历史遗留用非当前端口
+    port = int(config.server.port or 8000)
+    for h in ("127.0.0.1", "localhost"):
+        p = f"{h}:{port}"
+        if p not in prefixes:
+            prefixes.append(p)
+
+    explicit = (getattr(config.updater, "local_mirror_url", "") or "").strip()
+    if explicit:
+        p = re.sub(r"^https?://", "", explicit).rstrip("/")
+        if p and p not in prefixes:
+            prefixes.append(p)
+
+    # 去重（忽略大小写），保持顺序
+    seen: set = set()
+    out: List[str] = []
+    for p in prefixes:
+        p = p.strip().rstrip("/")
+        if p and p.lower() not in seen:
+            seen.add(p.lower())
+            out.append(p)
+    return out
+
+
+def cleanup_mirror_tags() -> Dict[str, Any]:
+    """清理所有镜像上以本地代理地址为前缀的 tag。"""
+    prefixes = get_local_mirror_prefixes()
+    logger.info("开始清理代理前缀标签，前缀列表：%s", prefixes)
+    return docker_service.cleanup_mirror_prefix_tags(prefixes)
 
 
 # ============================================================
@@ -162,16 +211,9 @@ def _has_available_proxy() -> bool:
 
 
 # ============================================================
-#  容器状态统计（供主页顶栏展示）
+#  容器状态统计
 # ============================================================
 def get_container_summary() -> Dict[str, int]:
-    """
-    返回容器状态统计：
-      - total:      容器总数（含自身容器）
-      - updatable:  有更新且无错误的容器数
-      - error:      检测出错的容器数
-      - checking:   正在检测的容器数
-    """
     total = len(check_results)
     updatable = 0
     error = 0
@@ -267,13 +309,6 @@ def _short_digest(d: Optional[str]) -> str:
 
 
 def _target_reference(current_image: str, entry: Dict[str, Any]) -> str:
-    """根据策略推导出目标镜像引用。
-
-    三种策略的语义（不再由 UI 直接暴露，仅由「更改 tag」按钮触发 pin）：
-      - track（默认） → 使用容器当前 tag（自动跟随，无论 tag 是 latest 还是 1.25.3）
-      - latest        → 强制改为 latest（保留兼容）
-      - pin           → 使用用户指定的 target_tag
-    """
     entry = entry or {}
     strategy = (entry.get("strategy") or "track").lower()
     registry, repo, current_tag = parse_image_reference(current_image)
@@ -296,7 +331,6 @@ def _target_reference(current_image: str, entry: Dict[str, Any]) -> str:
 #  取消控制
 # ============================================================
 def request_cancel(container_name: str) -> bool:
-    """请求取消指定容器的更新。返回 True 表示已受理。"""
     if container_name not in running_updates:
         return False
     cancel_requested[container_name] = True
@@ -350,7 +384,6 @@ async def check_one(
         logger.info("%s[%s] 自身容器，跳过检查", prefix, name)
         return result
 
-    # 手动检测时开启进度浮层
     if manual:
         progress.start(task_key, f"检测 {name}", total=100, message="查询本地镜像…")
 
@@ -362,7 +395,6 @@ async def check_one(
         if manual:
             progress.update(task_key, done=30, message="查询远程 digest…")
 
-        # ---- 根据 registry 类型决定检测源 ----
         raw_mirrors, use_direct, reason = _resolve_check_source(target_ref)
         mirrors_for_check = _expand_mirrors_for_check(raw_mirrors)
 
@@ -414,7 +446,6 @@ async def check_one(
         logger.exception("%s[%s] 检查异常", prefix, name)
         result["error"] = str(e)
     finally:
-        # 无论成功 / 失败 / 异常都关闭进度浮层
         if manual:
             if result.get("error"):
                 progress.finish(task_key, "检测失败")
@@ -437,17 +468,11 @@ async def run_check_all() -> List[Dict[str, Any]]:
     async with state_lock:
         check_in_progress = True
         try:
-            # 等待镜像加速就绪
             if config.updater.wait_for_proxy_ready:
                 if not _has_available_proxy():
                     wait_total = max(1, int(config.updater.proxy_ready_timeout_minutes or 15))
                     logger.info("[容器检测] 镜像加速尚未就绪，最多等待 %d 分钟…", wait_total)
-                    progress.start(
-                        "updater_wait",
-                        "等待镜像加速",
-                        total=wait_total * 60,
-                        message="等待节点检测完成…",
-                    )
+                    progress.start("updater_wait", "等待镜像加速", total=wait_total * 60, message="等待节点检测完成…")
                     deadline = time.time() + wait_total * 60
                     ok = False
                     start_ts = time.time()
@@ -456,11 +481,7 @@ async def run_check_all() -> List[Dict[str, Any]]:
                             ok = True
                             break
                         elapsed = int(time.time() - start_ts)
-                        progress.update(
-                            "updater_wait",
-                            done=min(elapsed, wait_total * 60),
-                            message=f"已等待 {elapsed}s / {wait_total * 60}s",
-                        )
+                        progress.update("updater_wait", done=min(elapsed, wait_total * 60), message=f"已等待 {elapsed}s / {wait_total * 60}s")
                         await asyncio.sleep(5)
 
                     if ok:
@@ -479,12 +500,7 @@ async def run_check_all() -> List[Dict[str, Any]]:
             containers = await loop.run_in_executor(None, docker_service.list_containers)
             logger.info("开始检查容器，共 %d 个（并发 %d）", len(containers), concurrency)
 
-            progress.start(
-                "updater_check",
-                "容器检测",
-                total=len(containers),
-                message=f"共 {len(containers)} 个容器",
-            )
+            progress.start("updater_check", "容器检测", total=len(containers), message=f"共 {len(containers)} 个容器")
 
             slots: "asyncio.Queue[int]" = asyncio.Queue()
             for i in range(1, concurrency + 1):
@@ -515,12 +531,7 @@ async def run_check_all() -> List[Dict[str, Any]]:
 
             updatable = sum(1 for r in results if r.get("update_available") and not r.get("error"))
             err_count = sum(1 for r in results if r.get("error"))
-            logger.info(
-                "检查完成：%d 个容器，%d 个可更新，%d 个出错",
-                len(results),
-                updatable,
-                err_count,
-            )
+            logger.info("检查完成：%d 个容器，%d 个可更新，%d 个出错", len(results), updatable, err_count)
             progress.finish("updater_check", f"完成，{updatable} 个可更新")
 
             if cfg.updater.auto_update:
@@ -548,7 +559,6 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
     entry = (cfg.updater.containers or {}).get(container_name) or {}
 
     task_key = f"upd_pull:{container_name}"
-    # 清除可能残留的取消标志
     cancel_requested.pop(container_name, None)
     running_updates[container_name] = "pulling"
     progress.start(task_key, f"更新 {container_name}", total=100, message="读取容器信息…")
@@ -556,18 +566,15 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
     try:
         loop = asyncio.get_running_loop()
 
-        # ---- 步骤 1：读取容器信息，决定拉取源 ----
         def _prepare():
             container = docker_service.client.containers.get(container_name)
             current_image = container.attrs["Config"]["Image"]
             target = _target_reference(current_image, entry)
 
-            # 根据 registry 类型决定拉取源
             raw_mirrors, _use_direct, reason = _resolve_check_source(target)
             pull_use_mirror = bool(cfg.updater.pull_use_mirror)
 
             if pull_use_mirror:
-                # 拉取阶段跳过 'local'（daemon 无法回连容器内部）
                 mirrors = _expand_mirrors_for_pull(raw_mirrors)
             else:
                 mirrors = []
@@ -576,7 +583,6 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
 
         container, target, mirrors, reason, pull_use_mirror = await loop.run_in_executor(None, _prepare)
 
-        # 取消检查点 1（准备阶段之后）
         if _is_cancelled(container_name):
             raise PullCancelled()
 
@@ -586,11 +592,74 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
             container_name,
             target,
             reason,
-            "启用" if pull_use_mirror and mirrors else "未使用",
+            ", ".join(mirrors) if (pull_use_mirror and mirrors) else "未使用（仅 direct）",
         )
 
-        # ---- 步骤 2：拉取镜像（流式，可取消） ----
         running_updates[container_name] = "pulling"
+
+        _PULL_DONE_MIN = 15
+        _PULL_DONE_MAX = 80
+        _EMIT_INTERVAL = 0.4
+
+        _pull_state: Dict[str, float] = {
+            "max_current": 0,
+            "max_total": 0,
+            "last_done": _PULL_DONE_MIN,
+            "last_emit": 0.0,
+        }
+
+        def _fmt_bytes(n: int) -> str:
+            if not n or n <= 0:
+                return "0 B"
+            units = ("B", "KB", "MB", "GB", "TB")
+            v = float(n)
+            i = 0
+            while v >= 1024 and i < len(units) - 1:
+                v /= 1024.0
+                i += 1
+            if i == 0:
+                return f"{int(v)} {units[i]}"
+            return f"{v:.1f} {units[i]}"
+
+        def _on_pull_progress(ev: Dict[str, Any]) -> None:
+            if not isinstance(ev, dict):
+                return
+
+            cur = int(ev.get("current") or 0)
+            tot = int(ev.get("total") or 0)
+
+            if tot > _pull_state["max_total"]:
+                _pull_state["max_total"] = tot
+            if cur > _pull_state["max_current"]:
+                _pull_state["max_current"] = cur
+
+            now = time.time()
+            if now - _pull_state["last_emit"] < _EMIT_INTERVAL:
+                return
+            _pull_state["last_emit"] = now
+
+            total_b = int(_pull_state["max_total"])
+            cur_b = int(_pull_state["max_current"])
+
+            if total_b <= 0:
+                progress.update(task_key, message="拉取镜像（准备中…）")
+                return
+
+            ratio = cur_b / total_b
+            if ratio > 1.0:
+                ratio = 1.0
+            done = _PULL_DONE_MIN + int(ratio * (_PULL_DONE_MAX - _PULL_DONE_MIN))
+
+            if done < _pull_state["last_done"]:
+                done = int(_pull_state["last_done"])
+            else:
+                _pull_state["last_done"] = done
+
+            progress.update(
+                task_key,
+                done=done,
+                message=f"拉取镜像 {_fmt_bytes(cur_b)} / {_fmt_bytes(total_b)}",
+            )
 
         def _pull():
             return docker_service.pull_image(
@@ -598,18 +667,19 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
                 mirrors,
                 bool(cfg.updater.use_direct),
                 should_cancel=lambda: _is_cancelled(container_name),
+                on_progress=_on_pull_progress,
             )
 
         image_ref, source = await loop.run_in_executor(None, _pull)
 
-        # 取消检查点 2（拉取完成之后、重建之前）
+        progress.update(task_key, done=_PULL_DONE_MAX, message="拉取完成，准备重建…")
+
         if _is_cancelled(container_name):
             logger.info("[%s] 拉取完成，但已在重建前收到取消请求", container_name)
             raise PullCancelled()
 
-        # ---- 步骤 3：重建容器 ----
         running_updates[container_name] = "recreating"
-        progress.update(task_key, done=60, message="重建容器…")
+        progress.update(task_key, done=85, message="重建容器…")
         logger.info("[%s] 重建容器（镜像 %s，来源 %s）", container_name, image_ref, source)
 
         info = await loop.run_in_executor(
@@ -619,28 +689,49 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
         info["source"] = source
         info["target_image"] = target
 
-        logger.info("[%s] 更新完成", container_name)
-        progress.finish(task_key, "更新完成")
+        logger.info("[%s] 容器已重建", container_name)
 
-        # ---- 更新成功后：自动清理已生效的 pin 策略 ----
-        # 若 pin 的 target_tag 与更新后容器实际使用的 tag 一致，
-        # 则该策略已"消费完毕"，自动清除恢复为 track（跟随当前 tag）。
-        # 这样「临时更改为 1.26 并更新完成」之后，UI 不再残留"指定 tag"的状态。
         try:
             _maybe_clear_pin_policy(container_name, target)
         except Exception as e:
             logger.warning("[%s] 自动清理 pin 策略失败: %s", container_name, e)
 
-        # ---- 更新成功后：立即执行一次版本检测 ----
-        # 目的：让 UI 立刻看到「已最新」，而不是等到下一个周期检测（默认 60 分钟）。
-        # 同步 await 而非后台 task：保证 API 返回时 check_results 已经刷新，
-        # 前端紧接着拉取 /api/updater/results 时拿到的是最新状态。
+        progress.update(task_key, done=95, message="校验更新结果（查询远程 digest）…")
+        logger.info("[%s] 开始更新后版本校验", container_name)
+
+        verify_result: Optional[Dict[str, Any]] = None
         try:
-            await _refresh_one(container_name)
-            logger.info("[%s] 更新后版本检测完成", container_name)
+            verify_result = await _refresh_one(container_name, task_key=task_key)
         except Exception as e:
-            # _refresh_one 内部已捕获异常，这里仅作双保险
-            logger.warning("[%s] 更新后版本检测失败: %s", container_name, e)
+            logger.warning("[%s] 更新后校验异常: %s", container_name, e)
+
+        if verify_result is None:
+            logger.warning("[%s] 更新后校验：容器列表中未找到该容器", container_name)
+            info["verified"] = None
+            progress.finish(task_key, "更新完成（校验跳过）")
+        elif verify_result.get("error"):
+            logger.warning("[%s] 更新后校验失败：%s", container_name, verify_result.get("error"))
+            info["verified"] = False
+            info["verify_error"] = verify_result.get("error")
+            progress.finish(task_key, f"更新完成（校验失败：{verify_result.get('error')}）")
+        elif verify_result.get("update_available"):
+            logger.warning(
+                "[%s] 更新后校验：仍检测到新版本（本地=%s 远程=%s，上游可能刚发布）",
+                container_name,
+                _short_digest(verify_result.get("local_digest")),
+                _short_digest(verify_result.get("remote_digest")),
+            )
+            info["verified"] = False
+            info["verify_note"] = "上游在更新期间发布了新版本"
+            progress.finish(task_key, "更新完成（⚠️ 远程又有新版本）")
+        else:
+            logger.info(
+                "[%s] 更新后校验通过：本地与远程 digest 一致（%s）",
+                container_name,
+                _short_digest(verify_result.get("remote_digest")),
+            )
+            info["verified"] = True
+            progress.finish(task_key, "更新完成，已是最新")
 
         return info
     except PullCancelled:
@@ -662,12 +753,6 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
 
 
 def _maybe_clear_pin_policy(container_name: str, new_image_ref: str) -> None:
-    """
-    更新成功后调用：
-      如果该容器当前的 pin 策略 target_tag 与更新后容器的实际 tag 一致，
-      说明该 pin 已经"完成使命"（用户希望这次用该 tag 更新，现在容器就用这个 tag 了），
-      自动清除策略，恢复为默认的 track（跟随当前 tag）。
-    """
     try:
         entry = (config.updater.containers or {}).get(container_name) or {}
         if (entry.get("strategy") or "track").lower() != "pin":
@@ -692,18 +777,29 @@ def _maybe_clear_pin_policy(container_name: str, new_image_ref: str) -> None:
         logger.warning("[%s] 自动清理 pin 策略异常: %s", container_name, e)
 
 
-async def _refresh_one(name: str) -> None:
+async def _refresh_one(
+    name: str,
+    task_key: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     try:
         cfg = config
         loop = asyncio.get_running_loop()
         containers = await loop.run_in_executor(None, docker_service.list_containers)
         for c in containers:
             if c["name"] == name:
-                check_results[name] = await check_one(c, cfg)
+                if task_key:
+                    progress.update(
+                        task_key,
+                        done=96,
+                        message="校验更新结果（比对本地 / 远程 digest）…",
+                    )
+                r = await check_one(c, cfg)
+                check_results[name] = r
                 _save_state()
-                break
+                return r
     except Exception:
         logger.exception("刷新 %s 状态失败", name)
+    return None
 
 
 async def run_log_cleanup() -> None:

@@ -3,7 +3,7 @@ import base64
 import logging
 import re
 import time
-from typing import Optional
+from typing import AsyncIterator, Optional
 from urllib.parse import quote, unquote
 
 import httpx
@@ -227,21 +227,34 @@ def _extract_image_name(path: str) -> str | None:
 
 # ============================================================
 #  预热探测：blob 响应进入正式转发前，先下载一段数据测速
+#
+#  【v1.1.1 修复】
+#  httpx 的响应流只能被消费一次。原实现中：
+#    - 预热阶段：response.aiter_bytes() 第一次消费
+#    - 转发阶段：r.aiter_bytes() 第二次消费
+#  第二次会抛 StreamConsumed，导致每个 blob 在"选到快节点"
+#  后立刻断流，Docker daemon 拉取失败。
+#
+#  修复策略：预热函数创建的 aiter 直接返回给调用方，
+#  由 iter_response 复用之，全程只消费一次。
 # ============================================================
 async def _warmup_check_blob(
     response: httpx.Response,
     warmup_seconds: float,
     threshold_bps: int,
-) -> tuple[bool, bytes, float]:
+) -> tuple[bool, bytes, float, "AsyncIterator[bytes]"]:
     """
     预热探测 blob 流。
 
     从上游响应中读取 warmup_seconds 秒的数据到内存，测量平均下载速度。
 
-    返回 (ok, buffered_bytes, speed_bps)：
+    返回 (ok, buffered_bytes, speed_bps, aiter)：
       - ok:             是否达标（若数据提前下完，视为达标）
       - buffered_bytes: 已下载数据（必须交给 iter_response 继续发送）
       - speed_bps:      平均速度（字节/秒）
+      - aiter:          与 response 绑定的异步迭代器，
+                        调用方【必须】复用它继续读取剩余数据，
+                        否则 httpx 会因重复消费抛出 StreamConsumed。
     """
     chunks: list[bytes] = []
     total = 0
@@ -276,10 +289,10 @@ async def _warmup_check_blob(
 
     # 数据提前读完 → 视为达标（小 blob 不值得预热判断）
     if elapsed < warmup_seconds:
-        return True, b"".join(chunks), speed
+        return True, b"".join(chunks), speed, aiter
 
     ok = speed >= threshold_bps
-    return ok, b"".join(chunks), speed
+    return ok, b"".join(chunks), speed, aiter
 
 
 # ============================================================
@@ -361,6 +374,9 @@ async def proxy_v2(path: str, request: Request) -> Response:
     last_error = None
     attempts_log: list[str] = []
     warmup_buffer: bytes = b""  # 预热阶段已下载的数据（需在正式转发前发送）
+    # 【v1.1.1 修复】预热阶段创建的迭代器，供 iter_response 复用，
+    # 避免 httpx 抛 StreamConsumed。
+    warmup_aiter: Optional[AsyncIterator[bytes]] = None
 
     _header_to = config.proxy.blob_header_timeout
     if _header_to is not None and _header_to <= 0:
@@ -453,12 +469,12 @@ async def proxy_v2(path: str, request: Request) -> Response:
             r = new_r
 
         # ============================================================
-        # 【新增】blob 预热测速
-        #   在把响应发给客户端之前，先下载一小段数据评估速度，
-        #   低速则切换下一个候选节点（客户端完全无感知）。
+        #  blob 预热测速
+        #    在把响应发给客户端之前，先下载一小段数据评估速度，
+        #    低速则切换下一个候选节点（客户端完全无感知）。
         # ============================================================
         if _is_blob_request and _warmup_seconds > 0 and _low_threshold > 0:
-            warmup_ok, warmup_chunks, warmup_speed = await _warmup_check_blob(
+            warmup_ok, warmup_chunks, warmup_speed, warmup_aiter = await _warmup_check_blob(
                 r,
                 _warmup_seconds,
                 _low_threshold,
@@ -470,6 +486,9 @@ async def proxy_v2(path: str, request: Request) -> Response:
                     f"节点 {node.name} 预热测速不达标：{speed_kb:.1f} KB/s " f"< {thr_kb:.1f} KB/s（窗口 {_warmup_seconds:.1f}s），切换下一个候选"
                 )
                 attempts_log.append(f"{node.name}:warmup-slow({speed_kb:.0f}KB/s)")
+                # 丢弃本节点的响应与迭代器
+                warmup_aiter = None
+                warmup_buffer = b""
                 try:
                     await r.aclose()
                 except Exception:
@@ -562,7 +581,7 @@ async def proxy_v2(path: str, request: Request) -> Response:
         _first_byte_to = None
 
     async def iter_response():
-        nonlocal warmup_buffer
+        nonlocal warmup_buffer, warmup_aiter
 
         total_downloaded = 0
         recorded = False
@@ -621,7 +640,14 @@ async def proxy_v2(path: str, request: Request) -> Response:
             yield warmup_buffer
             warmup_buffer = b""
 
-        aiter = r.aiter_bytes(chunk_size=config.proxy.stream_chunk_size)
+        # 【2】复用预热阶段创建的迭代器（关键修复）：
+        #     若预热已创建 aiter，则直接复用，避免 httpx 抛 StreamConsumed；
+        #     若未启用预热，则新建一个迭代器。
+        if warmup_aiter is not None:
+            aiter = warmup_aiter
+            warmup_aiter = None
+        else:
+            aiter = r.aiter_bytes(chunk_size=config.proxy.stream_chunk_size)
 
         try:
             while True:
@@ -653,9 +679,9 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 _update_speed_samples()
 
                 # ============================================================
-                # 【新增】中途低速监测
-                #   最近 _low_duration 秒内的平均速度低于阈值 → 中断流并熔断。
-                #   Docker 客户端会重试，由于该节点已熔断，重试会自动换节点。
+                #  中途低速监测
+                #    最近 _low_duration 秒内的平均速度低于阈值 → 中断流并熔断。
+                #    Docker 客户端会重试，由于该节点已熔断，重试会自动换节点。
                 # ============================================================
                 if _is_blob_request and _is_low_speed():
                     speed_kb = _low_threshold / 1024.0

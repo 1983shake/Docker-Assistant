@@ -93,12 +93,16 @@ class DockerService:
         mirrors: List[str],
         use_direct: bool = True,
         should_cancel: Optional[Callable[[], bool]] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[str, str]:
         """拉取镜像，返回 (最终使用的镜像引用, 源标签)。
 
-        若提供 should_cancel，则使用流式 API，并在每个进度事件前检查取消；
-        一旦取消，会立即停止读取事件流并抛出 PullCancelled。
-        Docker 守护进程会自行丢弃未完成的 layer，不影响后续重试。
+        【v1.1.1 修复】
+          1. 按 layer 聚合，向 on_progress 上报累计字节（用于进度条）。
+          2. 走加速源拉取时，Docker 会自动为镜像打上
+             "<mirror>/<image_ref>" 的前缀 tag。拉取成功后，
+             本函数**立即取消该前缀 tag**，只保留 image_ref，
+             避免镜像列表里出现 "127.0.0.1:8000/xxx:latest" 这类内部地址。
         """
         candidates: List[Tuple[str, str]] = []
         if is_dockerhub(image_ref):
@@ -106,41 +110,254 @@ class DockerService:
                 m = m.strip()
                 if not m:
                     continue
-                candidates.append((f"{normalize_mirror(m)}/{image_ref}", normalize_mirror(m)))
+                nm = normalize_mirror(m)
+                candidates.append((f"{nm}/{image_ref}", nm))
         if use_direct or not candidates:
             candidates.append((image_ref, "direct"))
 
+        if candidates:
+            logger.info(
+                "拉取源候选（顺序尝试）：%s",
+                " | ".join(f"{lbl} -> {src}" for src, lbl in candidates),
+            )
+
         errors: List[str] = []
         for src, label in candidates:
-            # 每个候选开始前检查一次
             if should_cancel and should_cancel():
                 raise PullCancelled()
 
+            # 按 layer 聚合：{layer_id: {"current": int, "total": int, "done": bool}}
+            layers: Dict[str, Dict[str, Any]] = {}
+            last_total_reported = 0
+
             try:
                 logger.info("从 %s 拉取 %s", label, src)
-                if should_cancel:
-                    # 流式拉取以便中途取消
-                    for event in self.client.api.pull(src, stream=True, decode=True):
-                        if should_cancel():
-                            logger.info("拉取 %s 被取消", src)
-                            raise PullCancelled()
-                        if isinstance(event, dict):
-                            err = event.get("error") or (event.get("errorDetail") or {}).get("message")
-                            if err:
-                                raise RuntimeError(err)
-                else:
-                    self.client.images.pull(src)
 
+                for event in self.client.api.pull(src, stream=True, decode=True):
+                    if should_cancel and should_cancel():
+                        logger.info("拉取 %s 被取消", src)
+                        raise PullCancelled()
+
+                    if not isinstance(event, dict):
+                        continue
+
+                    err = event.get("error") or (event.get("errorDetail") or {}).get("message")
+                    if err:
+                        raise RuntimeError(err)
+
+                    status = (event.get("status") or "").strip()
+                    lid = event.get("id")
+                    detail = event.get("progressDetail") or {}
+                    cur = detail.get("current")
+                    tot = detail.get("total")
+
+                    if lid and isinstance(cur, int) and isinstance(tot, int) and tot > 0:
+                        entry = layers.setdefault(lid, {"current": 0, "total": tot, "done": False})
+                        entry["total"] = tot
+                        if cur > entry["current"]:
+                            entry["current"] = cur
+                    elif lid and status in ("Download complete", "Pull complete"):
+                        entry = layers.setdefault(lid, {"current": 0, "total": 0, "done": False})
+                        entry["done"] = True
+                        if entry["total"] > 0:
+                            entry["current"] = entry["total"]
+                    elif lid and status == "Already exists":
+                        entry = layers.setdefault(lid, {"current": 0, "total": 0, "done": True})
+
+                    if on_progress is None:
+                        continue
+
+                    if layers:
+                        total_b = 0
+                        cur_b = 0
+                        done_cnt = 0
+                        for v in layers.values():
+                            t = int(v.get("total") or 0)
+                            c = int(v.get("current") or 0)
+                            if t <= 0:
+                                continue
+                            total_b += t
+                            if v.get("done"):
+                                cur_b += t
+                                done_cnt += 1
+                            else:
+                                cur_b += min(c, t)
+                        if total_b > 0:
+                            last_total_reported = total_b
+                            try:
+                                on_progress(
+                                    {
+                                        "phase": "downloading",
+                                        "current": cur_b,
+                                        "total": total_b,
+                                        "layers_total": sum(1 for v in layers.values() if int(v.get("total") or 0) > 0),
+                                        "layers_done": done_cnt,
+                                        "status": status,
+                                        "layer_id": lid,
+                                    }
+                                )
+                            except Exception:
+                                pass
+                    elif status:
+                        try:
+                            on_progress({"phase": "status", "status": status})
+                        except Exception:
+                            pass
+
+                if on_progress and last_total_reported > 0:
+                    try:
+                        on_progress(
+                            {
+                                "phase": "downloading",
+                                "current": last_total_reported,
+                                "total": last_total_reported,
+                                "layers_total": len(layers),
+                                "layers_done": len(layers),
+                                "status": "Pull complete",
+                                "layer_id": None,
+                            }
+                        )
+                    except Exception:
+                        pass
+
+                # ========================================================
+                #  【v1.1.1 关键修复】清理代理前缀 tag
+                #
+                #  当 src != image_ref 时，说明本次走了镜像加速源，
+                #  Docker 会为镜像自动打上 "<src>" 前缀 tag（例如
+                #  "127.0.0.1:8000/ekkoye8888/hermes-web-ui:latest"）。
+                #
+                #  这里先补上 image_ref 这个"原始 tag"，然后立刻删除
+                #  代理前缀 tag —— 镜像本体因为有原始 tag 引用而保留，
+                #  只是不再挂前缀 tag。
+                #
+                #  失败时仅告警，不影响主流程（镜像层已经拉取成功）。
+                # ========================================================
                 if src != image_ref:
-                    img = self.client.images.get(src)
-                    img.tag(image_ref)
+                    try:
+                        img = self.client.images.get(src)
+                    except ImageNotFound:
+                        img = None
+
+                    if img is None:
+                        logger.warning("拉取完成但未找到镜像 %s（src），跳过 tag 修正", src)
+                    else:
+                        try:
+                            img.tag(image_ref)
+                        except Exception as e:
+                            # 打原始 tag 失败：镜像本体还在（src tag 引用着），
+                            # 但容器无法用 image_ref 引用它，需要向上暴露错误
+                            logger.error("添加原始标签 %s 失败: %s", image_ref, e)
+                            raise
+
+                        # 打 tag 成功后，安全地删除代理前缀 tag
+                        try:
+                            self.client.images.remove(image=src, force=False, noprune=False)
+                            logger.info("已移除代理前缀标签 %s（保留原始标签 %s）", src, image_ref)
+                        except Exception as e:
+                            logger.warning("移除代理前缀标签 %s 失败: %s（镜像本体保留）", src, e)
+
                 return image_ref, label
+
             except PullCancelled:
                 raise
             except Exception as e:
-                logger.warning("从 %s 拉取 %s 失败: %s", label, src, e)
-                errors.append(f"{label}: {e}")
+                err_msg = str(e)
+                logger.warning("从 %s 拉取 %s 失败: %s", label, src, err_msg)
+
+                low = err_msg.lower()
+                if (
+                    "server gave http response to https client" in low
+                    or ("https" in low and "http response" in low)
+                    or ("tls" in low and "handshake" in low)
+                ):
+                    err_msg += (
+                        "（提示：目标为 HTTP 镜像源，需要在 daemon.json 的 "
+                        "insecure-registries 中加入该地址并重启 Docker。"
+                        "若使用 127.0.0.1:<port>，Docker 默认已允许 HTTP，无需额外配置。）"
+                    )
+                errors.append(f"{label}: {err_msg}")
+
         raise RuntimeError("所有拉取源均失败 -> " + "; ".join(errors))
+
+    # ================================================================== #
+    #  代理前缀标签工具
+    # ================================================================== #
+    @staticmethod
+    def _strip_mirror_prefix(tag: str, prefixes: List[str]) -> Optional[str]:
+        """从 tag 剥离已知前缀，返回原始 tag；无匹配返回 None。
+
+        例：tag="127.0.0.1:8000/foo/bar:latest"，prefixes=["127.0.0.1:8000"]
+           → "foo/bar:latest"
+        """
+        if not tag or not prefixes:
+            return None
+        t = tag
+        t_lower = t.lower()
+        for p in prefixes:
+            if not p:
+                continue
+            p_lower = p.lower().rstrip("/")
+            if t_lower.startswith(p_lower + "/"):
+                return t[len(p_lower) + 1 :]
+        return None
+
+    @staticmethod
+    def _is_mirror_prefix_tag(tag: str, prefixes: List[str]) -> bool:
+        """判断 tag 是否以某个代理地址前缀开头。"""
+        return DockerService._strip_mirror_prefix(tag, prefixes) is not None
+
+    def cleanup_mirror_prefix_tags(self, mirror_prefixes: List[str]) -> Dict[str, Any]:
+        """扫描所有镜像，删除以指定代理前缀开头的 tag。
+
+        设计：
+          - 只删除前缀 tag，镜像本体保留（由原始 tag 继续引用）。
+          - 若某镜像**只有**前缀 tag（没有其他 tag），跳过不删，
+            以免误删镜像本体。
+          - 每个 tag 删除失败（如被容器引用）不中断，记录到 failed。
+        """
+        prefixes = [p.strip().rstrip("/") for p in (mirror_prefixes or []) if p and p.strip()]
+        if not prefixes:
+            return {"ok": True, "removed": [], "failed": [], "skipped": []}
+
+        removed: List[str] = []
+        failed: List[Dict[str, str]] = []
+        skipped: List[str] = []
+
+        try:
+            images = list(self.client.images.list())
+        except Exception as e:
+            return {"ok": False, "error": str(e), "removed": [], "failed": [], "skipped": []}
+
+        for img in images:
+            tags = [t for t in (img.tags or []) if t]
+            if not tags:
+                continue
+
+            prefix_tags = [t for t in tags if self._is_mirror_prefix_tag(t, prefixes)]
+            if not prefix_tags:
+                continue
+
+            non_prefix_tags = [t for t in tags if t not in prefix_tags]
+            if not non_prefix_tags:
+                # 保护：镜像只剩前缀 tag，跳过避免误删镜像本体
+                skipped.extend(prefix_tags)
+                continue
+
+            for t in prefix_tags:
+                try:
+                    self.client.images.remove(image=t, force=False, noprune=False)
+                    removed.append(t)
+                except Exception as e:
+                    failed.append({"tag": t, "error": str(e)})
+
+        logger.info(
+            "代理前缀标签清理完成：删除 %d 个，跳过 %d 个（仅剩前缀），失败 %d 个",
+            len(removed),
+            len(skipped),
+            len(failed),
+        )
+        return {"ok": True, "removed": removed, "failed": failed, "skipped": skipped}
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -170,7 +387,6 @@ class DockerService:
         if cfg.get("StopSignal"):
             kwargs["stop_signal"] = cfg["StopSignal"]
 
-        # HostConfig
         rp = hc.get("RestartPolicy") or {}
         if rp.get("Name"):
             kwargs["restart_policy"] = {
@@ -194,7 +410,6 @@ class DockerService:
         if hc.get("Devices"):
             kwargs["devices"] = [f"{d['PathOnHost']}:{d['PathInContainer']}:{d['CgroupPermissions']}" for d in hc["Devices"]]
 
-        # 网络
         net_mode = hc.get("NetworkMode")
         custom_nets = [n for n in (ns.get("Networks") or {}).keys() if n not in ("bridge", "host", "none")]
         if net_mode in ("host", "none"):
@@ -202,23 +417,6 @@ class DockerService:
         elif custom_nets:
             kwargs["network"] = custom_nets[0]
 
-        # ------------------------------------------------------------------
-        # 端口映射
-        #
-        # 关键点：只有 network_mode 与端口映射「兼容」时才拼装 ports。
-        #
-        # docker-py 的 HostConfig.__init__ 内置了如下硬性检查：
-        #   network_mode == 'host' 或 network_mode.startswith('container:')
-        #   → 不允许携带 port_bindings，否则抛 InvalidArgument。
-        #
-        # 原因：
-        #   - host 模式：端口直接使用宿主机网络栈，不存在 NAT，端口映射无意义
-        #   - container:<id> 模式：共享目标容器的网络命名空间，端口同样不可指定
-        #
-        # 原实现无条件拼装 ports，导致 network_mode=host 的容器
-        # （如 hermes-webui）重建时报
-        #   "host" network_mode is incompatible with port_bindings
-        # ------------------------------------------------------------------
         _net_mode_str = (net_mode or "").strip().lower()
         _ports_compatible = not (_net_mode_str == "host" or _net_mode_str.startswith("container:"))
 
@@ -255,24 +453,6 @@ class DockerService:
                     len(hc.get("PortBindings") or {}),
                 )
 
-        # ------------------------------------------------------------------
-        # 挂载卷
-        #
-        # 关键点：以「容器内目标路径」(Destination) 去重，而不是以「源」去重。
-        #
-        # 原实现分别遍历 Mounts 和 Binds，volumes 的 key 是「源」，两个循环
-        # 独立进行，同一个 Destination 若在 Mounts 和 Binds 里各自出现一次
-        # （源写法不同，例如一个来自 Docker 内部卷路径、一个来自 compose 原始
-        # bind），就会拼出两个 entry，最终 Binds 数组里出现两条指向同一目标
-        # 的记录，Docker daemon 报 "Duplicate mount point"。
-        #
-        # 修复策略：
-        #   1) 优先使用 Mounts —— 这是 Docker 已解析的最终挂载状态，完整且可靠。
-        #      - Type=volume → 用 Name（卷名），否则 docker-py 会当成 bind mount
-        #      - Type=bind   → 用 Source（宿主机绝对路径）
-        #      - Type=tmpfs  → 跳过（无法通过 volumes 参数传递）
-        #   2) Binds 只用于补充 Mounts 中未覆盖的目标路径，绝不覆盖已处理的 dest。
-        # ------------------------------------------------------------------
         volumes: Dict[str, Any] = {}
         covered_dests: set = set()
 
@@ -282,29 +462,20 @@ class DockerService:
             if not dest:
                 continue
             if mtype == "tmpfs":
-                # tmpfs 需要走 HostConfig.Tmpfs 参数，这里跳过
                 continue
             if mtype == "volume":
-                # 命名卷：用 Name（卷名），docker-py 会识别为卷挂载
                 src = m.get("Name") or m.get("Source")
             else:
-                # bind / 其他：用宿主机路径
                 src = m.get("Source") or m.get("Name")
             if not src:
                 continue
             if dest in covered_dests:
-                # 同一个容器内目标路径重复 → 只保留第一个（Docker 也不允许重复）
-                logger.warning(
-                    "容器挂载目标 %s 重复出现（Mounts 内），已跳过源=%s",
-                    dest,
-                    src,
-                )
+                logger.warning("容器挂载目标 %s 重复出现（Mounts 内），已跳过源=%s", dest, src)
                 continue
             covered_dests.add(dest)
             mode = "rw" if m.get("RW", True) else "ro"
             volumes[src] = {"bind": dest, "mode": mode}
 
-        # Binds 只补充 Mounts 未覆盖的目标路径
         for b in hc.get("Binds") or []:
             parts = b.split(":")
             if len(parts) < 2:
@@ -315,7 +486,6 @@ class DockerService:
             if not src or not dest:
                 continue
             if dest in covered_dests:
-                # 该目标已被 Mounts 覆盖（或已被前面的 Binds 处理），跳过
                 continue
             covered_dests.add(dest)
             volumes[src] = {"bind": dest, "mode": mode}
@@ -327,7 +497,6 @@ class DockerService:
 
     # ------------------------------------------------------------------ #
     def recreate_container(self, container, new_image: str) -> Dict[str, Any]:
-        """安全重建：先用临时名创建新容器，成功后再移除旧容器并改名启动。"""
         attrs = container.attrs
         name = container.name
         was_running = container.status == "running"
@@ -346,7 +515,6 @@ class DockerService:
         logger.info("用新镜像 %s 创建临时容器 %s", new_image, tmp_name)
         new_container = self.client.containers.create(image=new_image, name=tmp_name, **kwargs)
 
-        # 连接额外网络
         custom_nets = [n for n in (ns.get("Networks") or {}).keys() if n not in ("bridge", "host", "none")]
         first = kwargs.get("network")
         for n in custom_nets:
@@ -357,7 +525,6 @@ class DockerService:
             except Exception as e:
                 logger.warning("连接网络 %s 失败: %s", n, e)
 
-        # 停止/删除旧容器
         if was_running:
             logger.info("停止容器 %s", name)
             try:
@@ -369,7 +536,6 @@ class DockerService:
         try:
             container.remove(force=True)
         except Exception as e:
-            # 删除旧容器失败：清理临时容器，避免残留
             logger.error("删除旧容器失败，回滚临时容器: %s", e)
             try:
                 new_container.remove(force=True)
@@ -377,7 +543,6 @@ class DockerService:
                 logger.error("回滚临时容器也失败: %s", e2)
             raise
 
-        # 重命名并启动
         new_container.rename(name)
         if was_running:
             logger.info("启动新容器 %s", name)
@@ -394,18 +559,6 @@ class DockerService:
     #  镜像管理
     # ================================================================== #
     def _image_reference_counts(self) -> Dict[str, int]:
-        """
-        统计容器对镜像的引用，返回 {镜像ID: 引用数}。
-
-        只使用容器 attrs["Image"]（容器实际使用的镜像 ID）。
-        不再统计 Config.Image（tag）——因为：
-          - 容器创建后，Config.Image 不会随 tag 转移而变化
-          - 如果 tag 已经转到新镜像（例如 docker pull 更新了 tag），
-            旧容器的 Config.Image 依然指向这个 tag，会造成 tag 匹配误判
-          - 结果就是：新镜像被误判为"使用中"，实际上容器仍在用旧镜像 ID
-
-        只按 ID 匹配才能如实反映容器真正使用哪个镜像。
-        """
         counts: Dict[str, int] = {}
         try:
             for c in self.client.containers.list(all=True):
@@ -419,22 +572,9 @@ class DockerService:
 
     @staticmethod
     def _resolve_container_count(img, counts: Dict[str, int]) -> int:
-        """
-        根据引用计数表，计算某个镜像被多少容器引用。
-
-        匹配优先级（任一级命中即返回）：
-          1. img.id 完整匹配 counts 的 key
-          2. img.id 短 ID（前 12 位）匹配 counts 的 key 短 ID
-          3. 兜底：Docker 自带的 attrs["Containers"]（>= 0）
-
-        注意：不进行 tag 匹配。tag 匹配会把"tag 已转移到新镜像但容器仍用旧 ID"
-        的场景误判为"新镜像使用中"，掩盖容器未真正使用新镜像的事实。
-        """
-        # 1. 按完整镜像 ID 匹配
         if img.id and img.id in counts:
             return counts[img.id]
 
-        # 2. 按短 ID 匹配（只对看起来像 ID 的 key 生效，避免误匹配 tag）
         if img.id:
             target_short = img.id.replace("sha256:", "")[:12]
             for k, v in counts.items():
@@ -447,22 +587,44 @@ class DockerService:
                 if k_short == target_short:
                     return v
 
-        # 3. 兜底：Docker 自带的 attrs["Containers"]
-        #    -1 表示"未计算"，视作 0
         try:
             n = int((img.attrs or {}).get("Containers") or 0)
             return max(0, n)
         except (TypeError, ValueError):
             return 0
 
-    def list_images(self) -> List[Dict[str, Any]]:
-        """列出本地镜像，每个镜像一条记录（包含全部标签与真实容器引用数）。"""
+    def list_images(
+        self,
+        mirror_prefixes: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """列出本地镜像，每个镜像一条记录。
+
+        【v1.1.1 增强】mirror_prefixes 提供时，会把每个 tag 上的代理前缀剥离：
+
+          "127.0.0.1:8000/ekkoye8888/hermes-web-ui:latest"
+            → "ekkoye8888/hermes-web-ui:latest"
+
+        剥离仅影响展示层，不修改 Docker 存储（存储层由 pull_image 清理）。
+        同时返回 raw_tags 以便调试。
+        """
         counts = self._image_reference_counts()
+        prefixes = [p.strip().rstrip("/") for p in (mirror_prefixes or []) if p and p.strip()]
 
         out: List[Dict[str, Any]] = []
         for img in self.client.images.list():
             attrs = img.attrs or {}
-            tags = list(img.tags or [])
+            raw_tags = list(img.tags or [])
+
+            # 显示层：剥离代理前缀；同一镜像内去重
+            display_tags: List[str] = []
+            seen: set = set()
+            for t in raw_tags:
+                stripped = self._strip_mirror_prefix(t, prefixes) if prefixes else None
+                effective = stripped or t
+                if effective and effective not in seen:
+                    seen.add(effective)
+                    display_tags.append(effective)
+
             try:
                 size = int(attrs.get("Size") or 0)
             except (TypeError, ValueError):
@@ -474,21 +636,19 @@ class DockerService:
                 {
                     "id": img.id,
                     "short_id": (img.short_id or "").replace("sha256:", "")[:12],
-                    "tags": tags,
+                    "tags": display_tags,
+                    "raw_tags": raw_tags,
                     "repo_digests": list(attrs.get("RepoDigests") or []),
                     "size": size,
                     "created": attrs.get("Created") or "",
                     "containers": containers,
-                    "dangling": len(tags) == 0,
+                    # dangling 判断基于原始 tags（镜像本体是否被任何 tag 引用）
+                    "dangling": len(raw_tags) == 0,
                 }
             )
         return out
 
     def _containers_using_image(self, image_ref: str) -> List[Dict[str, str]]:
-        """列出引用了指定镜像的容器（按镜像 ID / 短 ID 匹配）。
-
-        与 _image_reference_counts 保持一致：只用 ID 匹配。
-        """
         out: List[Dict[str, str]] = []
         if not image_ref:
             return out
@@ -509,22 +669,12 @@ class DockerService:
                 elif img_id.replace("sha256:", "")[:12] == ref_short:
                     match = True
                 if match:
-                    out.append(
-                        {
-                            "name": c.name,
-                            "id": c.id[:12],
-                            "status": c.status,
-                        }
-                    )
+                    out.append({"name": c.name, "id": c.id[:12], "status": c.status})
         except Exception as e:
             logger.debug("枚举镜像引用容器失败: %s", e)
         return out
 
     def remove_image(self, image_ref: str, force: bool = False, noprune: bool = False) -> Dict[str, Any]:
-        """删除镜像（按 ID 或 name:tag）。
-
-        被容器引用时给出友好提示；不再向上抛出原始 Docker 堆栈。
-        """
         using = self._containers_using_image(image_ref)
 
         try:
@@ -532,7 +682,6 @@ class DockerService:
         except APIError as e:
             msg = str(e)
             low = msg.lower()
-            # Docker 在镜像被容器占用时会返回 409 Conflict
             if "conflict" in low or "image is being used" in low:
                 if using:
                     detail = "、".join(f"{c['name']}（{c['status']}）" for c in using)
@@ -546,7 +695,6 @@ class DockerService:
         return {"ok": True, "image": image_ref, "force": force}
 
     def prune_images(self) -> Dict[str, Any]:
-        """清理悬空镜像（<none>:<none>），返回删除明细与释放空间。"""
         result = self.client.images.prune(filters={"dangling": True}) or {}
         deleted = result.get("ImagesDeleted") or []
         untagged = [d.get("Untagged") for d in deleted if d.get("Untagged")]
@@ -567,16 +715,6 @@ class DockerService:
         }
 
     def prune_unused_images(self) -> Dict[str, Any]:
-        """清理未使用镜像（有 tag 但无任何容器引用）。
-
-        与 prune_images 的区别：
-          - prune_images 删除的是悬空镜像（<none>:<none>，无 tag）
-          - prune_unused_images 删除的是有 tag、但没有任何容器（含已停止）引用的镜像
-
-        实现方式：遍历镜像列表，逐个 tag 调用 remove。
-        多 tag 的镜像会依次取消每个 tag；全部成功则视为该镜像已被删除，计入释放空间。
-        删除过程遇到失败（权限、竞态等）不会中断，会记录到 failed 列表。
-        """
         counts = self._image_reference_counts()
 
         deleted_tags: List[str] = []
@@ -591,10 +729,8 @@ class DockerService:
 
         for img in images:
             tags = [t for t in (img.tags or []) if t]
-            # 悬空镜像交给 prune_images 处理，这里跳过
             if not tags:
                 continue
-            # 有容器（含已停止）引用，跳过（使用多级匹配，避免误删使用中的镜像）
             if self._resolve_container_count(img, counts) > 0:
                 continue
 
