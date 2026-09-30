@@ -3,12 +3,27 @@
 所有长任务（节点拉取 / 在线检测 / 速度测试 / 容器检测 / 容器更新）
 统一调用本模块的 start / update / finish，前端只需轮询 /api/tasks/status
 即可同时看到所有任务的进度。
+
+「已完成任务」在内存中的保留时长由 config.updater.progress_popup_duration
+控制（默认 3 秒），该值同时也决定前端状态浮窗的展示时长。
 """
 
 import time
 
 _progress: dict[str, dict] = {}
-_PROGRESS_TTL = 30  # 已完成任务状态保留秒数
+
+
+def _get_ttl() -> int:
+    """从配置读取「已完成任务」保留秒数。
+
+    延迟导入 config 以避免循环依赖。读取失败时回退到 3 秒。
+    """
+    try:
+        from app.config import config  # 延迟导入
+
+        return max(1, int(getattr(config.updater, "progress_popup_duration", 3) or 3))
+    except Exception:
+        return 3
 
 
 def start(task: str, label: str, total: int = 0, message: str = ""):
@@ -57,8 +72,9 @@ def finish(task: str, message: str = "完成"):
 def get_all() -> dict:
     """返回当前任务进度（自动清理已结束的旧任务）。"""
     now = time.time()
+    ttl = _get_ttl()
     for k in list(_progress.keys()):
         v = _progress[k]
-        if not v.get("running") and now - v.get("updated_at", 0) > _PROGRESS_TTL:
+        if not v.get("running") and now - v.get("updated_at", 0) > ttl:
             _progress.pop(k, None)
     return {k: dict(v) for k, v in _progress.items()}

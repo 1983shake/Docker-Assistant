@@ -75,6 +75,7 @@
         .view-pane { display: block; }
 
         .node-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        .node-table.auto-layout { table-layout: auto; }
         .node-table th, .node-table td {
             padding: 9px 10px; text-align: left;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -90,6 +91,14 @@
         .node-table tbody tr { border-bottom: 1px solid #f3f4f6; transition: background .15s; }
         .node-table tbody tr:hover { background: #f9fafb; }
         .node-table tbody tr:last-child { border-bottom: 0; }
+
+        .node-table td code {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #1f2937;
+        }
 
         .mono, code, pre {
             font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas",
@@ -131,6 +140,73 @@
         .b-up { color: #f59e0b; border-color: #f59e0b; }
         .b-ok { color: #10b981; border-color: #10b981; }
         .b-err { color: #ef4444; border-color: #ef4444; }
+        .b-cancel { color: #f97316; border-color: #f97316; }
+
+        .img-badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 2px 8px; border-radius: 999px;
+            font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+            border: 1px solid transparent;
+            font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+        }
+        .img-badge .dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            display: inline-block;
+        }
+        .img-badge.used { color: #10b981; border-color: #10b981; background: rgba(16,185,129,.08); }
+        .img-badge.used .dot { background: #10b981; }
+        .img-badge.unused { color: #6366f1; border-color: #6366f1; background: rgba(99,102,241,.08); }
+        .img-badge.unused .dot { background: #6366f1; }
+        .img-badge.dangling { color: #64748b; border-color: #cbd5e1; background: rgba(148,163,184,.12); }
+        .img-badge.dangling .dot { background: #94a3b8; }
+
+        .tag-kind {
+            display: inline-block;
+            padding: 1px 7px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            line-height: 1.5;
+            vertical-align: middle;
+            white-space: nowrap;
+            font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+        }
+        .tag-kind.floating { color: #0891b2; background: rgba(6,182,212,.1); border: 1px solid rgba(6,182,212,.3); }
+        .tag-kind.pinned { color: #7c3aed; background: rgba(139,92,246,.1); border: 1px solid rgba(139,92,246,.3); }
+        .tag-kind.custom { color: #ea580c; background: rgba(234,88,12,.1); border: 1px solid rgba(234,88,12,.3); }
+        .tag-kind.other { color: #64748b; background: rgba(148,163,184,.12); border: 1px solid rgba(148,163,184,.3); }
+
+        .target-cell {
+            vertical-align: middle;
+            overflow: hidden;
+        }
+        .target-cell code.target-path {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #1f2937;
+        }
+        .target-cell .target-meta {
+            display: block;
+            margin-top: 2px;
+            font-size: 11px;
+            color: #9ca3af;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tag-col-cell { white-space: nowrap; vertical-align: middle; }
+
+        .op-cell { white-space: nowrap; }
+        .op-cell .op-row {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: nowrap;
+        }
 
         th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
         th.sortable:hover { color: #1f2937; }
@@ -160,11 +236,12 @@
         .log-empty { color: #94a3b8; }
 
         .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
-        .tag-list code { font-size: 11px; }
+        .tag-list code { font-size: 11px; display: inline-block; }
 
         .upd-btn {
             background: #0f4c81; color: #fff; border: 0; border-radius: 6px;
             padding: 6px 12px; cursor: pointer; font-size: 12.5px; font-family: inherit;
+            white-space: nowrap;
         }
         .upd-btn:hover { background: #0d3f6c; }
         .upd-btn.ghost { background: transparent; border: 1px solid #d1d5db; color: #374151; }
@@ -191,7 +268,6 @@
         .toast.err { border-color: #ef4444; }
         .toast.ok { border-color: #10b981; }
 
-        /* ---------- 顶栏统计卡片 ---------- */
         .header-stats {
             display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
         }
@@ -211,9 +287,52 @@
         .header-stat-chip:hover { background: rgba(255,255,255,.22); }
         .header-stat-chip.updatable { background: rgba(245,158,11,.2); border-color: rgba(245,158,11,.5); }
         .header-stat-chip.error { background: rgba(239,68,68,.2); border-color: rgba(239,68,68,.5); }
+        .header-stat-chip.unused { background: rgba(99,102,241,.2); border-color: rgba(99,102,241,.5); }
         .header-stat-chip.dangling { background: rgba(148,163,184,.2); border-color: rgba(148,163,184,.5); }
         .header-stat-chip .num { font-family: "JetBrains Mono", monospace; font-weight: 700; }
         .header-stat-chip.zero { opacity: .5; }
+
+        .indeterminate-bar {
+            width: 40%;
+            animation: indeterminate-slide 1.4s ease-in-out infinite;
+        }
+        @keyframes indeterminate-slide {
+            0%   { transform: translateX(-100%); }
+            100% { transform: translateX(300%); }
+        }
+
+        .task-cancel-btn {
+            font-size: 11px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: rgba(239,68,68,.1);
+            color: #dc2626;
+            border: 1px solid rgba(239,68,68,.3);
+            cursor: pointer;
+            transition: all .15s;
+        }
+        .task-cancel-btn:hover { background: rgba(239,68,68,.2); }
+
+        /* ---------- 状态浮窗 · 通知卡片 ---------- */
+        .status-notif {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.5;
+            border: 1px solid transparent;
+            word-break: break-word;
+        }
+        .status-notif .n-ico { flex: 0 0 auto; margin-top: 2px; }
+        .status-notif .n-msg { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; }
+        .status-notif.ok   { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+        .status-notif.ok   .n-ico { color: #10b981; }
+        .status-notif.err  { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+        .status-notif.err  .n-ico { color: #ef4444; }
+        .status-notif.info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
+        .status-notif.info .n-ico { color: #3b82f6; }
     </style>
 
     <script src="https://cdn.tailwindcss.com/3.4.1"></script>
@@ -247,9 +366,7 @@
                         </div>
                     </div>
 
-                    <!-- 顶栏右侧：拉取状态 + 容器统计 -->
                     <div class="header-stats">
-                        <!-- 拉取状态 -->
                         <div class="pull-stat text-right leading-relaxed"
                              @click="showPullsModal = true"
                              title="点击查看最近拉取记录">
@@ -263,7 +380,6 @@
 
                         <span class="opacity-30">|</span>
 
-                        <!-- 容器统计 -->
                         <div class="flex items-center gap-2 flex-wrap">
                             <span class="header-stat-chip updatable"
                                   :class="{ zero: !updSummary.updatable }"
@@ -278,6 +394,13 @@
                                   :title="'检测出错的容器数：' + updSummary.error">
                                 <i class="fas fa-exclamation-circle"></i>
                                 错误 <span class="num">[[ updSummary.error ]]</span>
+                            </span>
+                            <span class="header-stat-chip unused"
+                                  :class="{ zero: !updSummary.unused }"
+                                  @click="switchMainView('images')"
+                                  :title="'未使用镜像数（有标签但无容器引用）：' + updSummary.unused + '（点击查看镜像管理）'">
+                                <i class="fas fa-box-open"></i>
+                                未使用 <span class="num">[[ updSummary.unused ]]</span>
                             </span>
                             <span class="header-stat-chip dangling"
                                   :class="{ zero: !updSummary.dangling }"
@@ -602,7 +725,11 @@
                         <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
                             <div>
                                 <h3 class="text-lg font-bold text-gray-800 tracking-tight">容器列表</h3>
-                                <p class="text-xs text-gray-500 mt-1">上次检查：<span id="updLastCheck" class="mono-num">—</span></p>
+                                <p class="text-xs text-gray-500 mt-1">
+                                    上次检查：<span id="updLastCheck" class="mono-num">—</span>
+                                    <span class="mx-1 text-gray-300">|</span>
+                                    检测自动按容器当前 tag 进行（latest 查 latest，固定版本查同版本）
+                                </p>
                             </div>
                             <div class="flex flex-wrap gap-1.5 items-center">
                                 <span class="text-xs text-gray-500" id="updSelInfo">已选 0 个</span>
@@ -612,17 +739,27 @@
                             </div>
                         </div>
                         <div class="w-full bg-white border border-gray-200 rounded-xl overflow-x-auto shadow-sm">
-                            <table class="node-table" id="updContainersTable">
+                            <table class="node-table auto-layout" id="updContainersTable">
+                                <colgroup>
+                                    <col style="width:36px">
+                                    <col>
+                                    <col style="width:110px">
+                                    <col style="width:33%">
+                                    <col style="width:33%">
+                                    <col>
+                                    <col>
+                                    <col>
+                                </colgroup>
                                 <thead>
                                     <tr>
-                                        <th style="width:36px" class="no-sort"><input type="checkbox" id="updChkAll" title="全选/取消全选" /></th>
+                                        <th class="no-sort"><input type="checkbox" id="updChkAll" title="全选/取消全选" /></th>
                                         <th class="sortable" data-sort="name">名称</th>
+                                        <th class="sortable" data-sort="tag_kind">版本标签</th>
                                         <th class="sortable" data-sort="image">当前镜像</th>
-                                        <th class="sortable" data-sort="target_image">目标镜像</th>
-                                        <th class="sortable" data-sort="strategy">策略</th>
+                                        <th class="sortable" data-sort="target_image">检测目标</th>
                                         <th class="sortable" data-sort="status">状态</th>
                                         <th class="sortable" data-sort="update">更新</th>
-                                        <th style="width:150px" class="no-sort">操作</th>
+                                        <th class="no-sort">操作</th>
                                     </tr>
                                 </thead>
                                 <tbody id="updContainersBody">
@@ -646,24 +783,35 @@
                                 <p class="text-xs text-gray-500 mt-1" id="updImgSummary">—</p>
                             </div>
                             <div class="flex flex-wrap gap-1.5">
+                                <button id="btnUpdPruneUnusedImages" class="upd-btn ghost"><i class="fas fa-box-open mr-1"></i>清理未使用镜像</button>
                                 <button id="btnUpdPruneImages" class="upd-btn ghost"><i class="fas fa-broom mr-1"></i>清理悬空镜像</button>
                                 <button id="btnUpdRefreshImages" class="upd-btn ghost"><i class="fas fa-redo mr-1"></i>刷新</button>
                             </div>
                         </div>
                         <div class="w-full bg-white border border-gray-200 rounded-xl overflow-x-auto shadow-sm">
                             <table class="node-table" id="updImagesTable">
+                                <colgroup>
+                                    <col style="width:92px">
+                                    <col>
+                                    <col style="width:110px">
+                                    <col style="width:80px">
+                                    <col style="width:130px">
+                                    <col style="width:60px">
+                                    <col style="width:90px">
+                                </colgroup>
                                 <thead>
                                     <tr>
+                                        <th class="sortable" data-sort="status">状态</th>
                                         <th class="sortable" data-sort="tags">标签</th>
                                         <th class="sortable" data-sort="id">镜像 ID</th>
                                         <th class="sortable" data-sort="size">大小</th>
                                         <th class="sortable" data-sort="created">创建时间</th>
                                         <th class="sortable" data-sort="containers">容器</th>
-                                        <th style="width:90px" class="no-sort">操作</th>
+                                        <th class="no-sort">操作</th>
                                     </tr>
                                 </thead>
                                 <tbody id="updImagesBody">
-                                    <tr><td colspan="6" class="text-center text-gray-400 py-8">加载中…</td></tr>
+                                    <tr><td colspan="7" class="text-center text-gray-400 py-8">加载中…</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -697,27 +845,65 @@
             </main>
         </div>
 
-        <!-- 任务进度浮层 -->
-        <div v-if="progressTasks.length > 0" class="fixed bottom-5 right-5 z-40 w-80">
+        <!-- ============================================================
+             统一状态浮窗
+             ============================================================ -->
+        <div v-if="showStatusPopup" class="fixed bottom-5 right-5 z-40 w-80">
             <div class="bg-white rounded-lg shadow-2xl border border-gray-200 overflow-hidden">
                 <div class="gradient-bg text-white px-4 py-2 flex justify-between items-center">
                     <span class="text-sm font-bold flex items-center gap-2 tracking-wide">
-                        <i class="fas fa-circle-notch fa-spin"></i> 任务进行中
+                        <i :class="popupTitleIcon"></i> [[ popupTitle ]]
                     </span>
-                    <span class="text-[10.5px] opacity-80 mono-num">[[ progressTasks.length ]] 个</span>
+                    <span class="text-[10.5px] opacity-80 mono-num">
+                        [[ progressTasks.length + notifications.length ]] 个
+                    </span>
                 </div>
-                <div class="p-3 space-y-3 max-h-80 overflow-y-auto">
+                <div class="p-3 space-y-3 max-h-96 overflow-y-auto">
+                    <!-- 通知消息区（原 toast 内容） -->
+                    <div v-for="n in notifications" :key="'n' + n.id"
+                         class="status-notif"
+                         :class="n.kind === 'err' ? 'err' : (n.kind === 'info' ? 'info' : 'ok')">
+                        <i class="fas n-ico"
+                           :class="n.kind === 'err' ? 'fa-exclamation-circle'
+                                 : (n.kind === 'info' ? 'fa-info-circle' : 'fa-check-circle')"></i>
+                        <div class="n-msg">[[ n.msg ]]</div>
+                    </div>
+
+                    <!-- 任务进度区 -->
                     <div v-for="t in progressTasks" :key="t.key">
                         <div class="flex justify-between items-center mb-1">
                             <span class="text-xs font-medium text-gray-700">[[ t.label ]]</span>
-                            <span class="text-[11px] text-gray-500 mono-num">[[ t.done ]]/[[ t.total ]]</span>
-                        </div>
-                        <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
-                            <div class="h-1.5 rounded-full transition-all duration-300"
-                                :class="t.running ? 'bg-blue-500' : 'bg-green-500'" :style="{ width: t.percent + '%' }">
+                            <div class="flex items-center gap-2">
+                                <span v-if="t.total > 0" class="text-[11px] text-gray-500 mono-num">
+                                    [[ t.done ]]/[[ t.total ]]
+                                </span>
+                                <span v-else class="text-[11px] text-gray-500 mono-num">
+                                    [[ t.running ? '处理中…' : '已完成' ]]
+                                </span>
+                                <button v-if="t.running && t.key && t.key.indexOf('upd_pull:') === 0"
+                                    @click.stop="cancelUpdate(t.key.substring('upd_pull:'.length))"
+                                    class="task-cancel-btn"
+                                    title="取消此更新">取消</button>
                             </div>
                         </div>
-                        <div class="text-[11px] text-gray-400 mt-1">[[ t.message || '处理中…' ]]</div>
+                        <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
+                            <div v-if="t.total > 0"
+                                class="h-1.5 rounded-full transition-all duration-300"
+                                :class="t.running ? 'bg-blue-500' : (t.ok === false ? 'bg-red-500' : 'bg-green-500')"
+                                :style="{ width: t.percent + '%' }">
+                            </div>
+                            <div v-else
+                                class="h-1.5 rounded-full"
+                                :class="t.running ? 'bg-blue-500 indeterminate-bar' : (t.ok === false ? 'bg-red-500' : 'bg-green-500')"
+                                :style="!t.running ? { width: '100%' } : {}">
+                            </div>
+                        </div>
+                        <div class="text-[11px] mt-1 flex items-center gap-1"
+                             :class="t.running ? 'text-gray-400' : (t.ok === false ? 'text-red-600' : 'text-green-600')">
+                            <i v-if="!t.running" class="fas text-[9px]"
+                               :class="t.ok === false ? 'fa-times' : 'fa-check'"></i>
+                            [[ t.message || (t.running ? '处理中…' : '完成') ]]
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1149,6 +1335,40 @@
                                 </div>
                             </div>
                         </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">
+                                低速切换
+                                <span class="text-[10px] text-gray-400 font-normal ml-1">（速度低于阈值时切换节点）</span>
+                            </h4>
+                            <p class="text-[11px] text-gray-500 mb-3 leading-relaxed">
+                                拉取 blob 时，若平均速度持续低于阈值，将自动切换到下一个候选节点。<br>
+                                <b>预热探测</b>：在正式传输前先下载一小段数据测速，低速直接换节点（客户端无感知）。<br>
+                                <b>中途监测</b>：传输过程中持续监测，低速则中断流并熔断当前节点（客户端重试时会走其他节点）。
+                            </p>
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">低速阈值（KB/s）</label>
+                                    <input :value="Math.round((configForm.proxy.low_speed_threshold || 0) / 1024)"
+                                        @input="configForm.proxy.low_speed_threshold = Math.max(0, parseInt($event.target.value, 10) || 0) * 1024"
+                                        type="number" min="0" step="64"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                    <p class="text-[11px] text-gray-400 mt-1">默认 512 KB/s，0 表示不限制</p>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">低速持续时间（秒）</label>
+                                    <input v-model.number="configForm.proxy.low_speed_duration" type="number" min="0" step="1"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                    <p class="text-[11px] text-gray-400 mt-1">默认 10 秒</p>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">预热探测时长（秒）</label>
+                                    <input v-model.number="configForm.proxy.warmup_seconds" type="number" min="0" step="0.5"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                    <p class="text-[11px] text-gray-400 mt-1">默认 2 秒，0 表示不预热</p>
+                                </div>
+                            </div>
+                        </div>
                     </template>
 
                     <template v-if="activeConfigTab === 'schedule'">
@@ -1324,6 +1544,12 @@
                                         <input v-model="configForm.updater.auto_update" type="checkbox" class="w-4 h-4 text-blue-600 border-gray-300 rounded">
                                         <span class="text-xs text-gray-500">发现更新自动拉取</span>
                                     </label>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">状态浮窗展示（秒）</label>
+                                    <input v-model.number="configForm.updater.progress_popup_duration" type="number" min="1" max="60"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                    <p class="text-[11px] text-gray-400 mt-1">任务完成后浮窗保留时长（默认 3）</p>
                                 </div>
                             </div>
                         </div>
@@ -1640,11 +1866,11 @@
                             updContainerCount: 0,
                             updImageCount: 0,
 
-                            // 顶栏容器状态统计
                             updSummary: {
                                 total: 0,
                                 updatable: 0,
                                 error: 0,
+                                unused: 0,
                                 dangling: 0,
                                 checking: 0,
                             },
@@ -1672,6 +1898,9 @@
                                     follow_redirect_fail_cooldown: 300, blob_fail_cooldown: 600,
                                     prefer_recent_success: true, recent_success_window: 120,
                                     affinity_window: 120, probe_node_window: 300,
+                                    low_speed_threshold: 524288,
+                                    low_speed_duration: 10.0,
+                                    warmup_seconds: 2.0,
                                 },
                                 access: { ip_whitelist: [], image_whitelist_regex: '', image_blacklist_regex: '' },
                                 auto_fetch: { enabled: true, interval_minutes: 1440, api_url: 'https://status.anye.xyz', registry_types: [], filters: { selectable: true, access: 'public' } },
@@ -1692,6 +1921,7 @@
                                     pull_use_mirror: true,
                                     registry_username: '', registry_password: '',
                                     log_max_entries: 5000, log_retention_days: 7, log_display_level: 'INFO',
+                                    progress_popup_duration: 3,
                                     containers: {},
                                 },
                             },
@@ -1728,6 +1958,9 @@
                             sortKey: 'speed', sortOrder: 'desc',
                             selectedIds: [], testingIds: [], taskProgress: {},
                             pollTimer: null, _hadRunningTask: false, manualOperation: false,
+                            popupDuration: Number('{{ popup_duration }}') || 3,
+                            notifications: [],
+                            notificationSeq: 0,
                             tabs: [
                                 { label: '全部', value: 'all' },
                                 { label: 'DockerHub', value: 'dockerhub' },
@@ -1772,7 +2005,23 @@
                         },
                         totalPages() { return Math.ceil(this.filteredProxies.length / this.pageSize) || 1; },
                         progressTasks() {
-                            return Object.entries(this.taskProgress).filter(([_, v]) => v.running).map(([k, v]) => ({ key: k, ...v }));
+                            return Object.entries(this.taskProgress).map(([k, v]) => ({ key: k, ...v }));
+                        },
+                        hasRunningTask() {
+                            return Object.values(this.taskProgress).some(v => v.running);
+                        },
+                        showStatusPopup() {
+                            return this.progressTasks.length > 0 || this.notifications.length > 0;
+                        },
+                        popupTitle() {
+                            if (this.hasRunningTask) return '任务进行中';
+                            if (this.progressTasks.length > 0) return '全部完成';
+                            return '通知';
+                        },
+                        popupTitleIcon() {
+                            if (this.hasRunningTask) return 'fas fa-circle-notch fa-spin';
+                            if (this.progressTasks.length > 0) return 'fas fa-check-circle';
+                            return 'fas fa-bell';
                         }
                     },
                     watch: {
@@ -1820,6 +2069,62 @@
                             if (window.__updOnViewChange) window.__updOnViewChange(name);
                         },
 
+                        pushNotification(msg, kind = 'ok', ms = null) {
+                            if (!msg) return;
+                            const durationMs = (ms != null && ms > 0) ? ms : (this.popupDuration * 1000);
+                            const id = ++this.notificationSeq;
+                            this.notifications.push({ id, msg: String(msg), kind });
+                            if (this.notifications.length > 10) {
+                                this.notifications.splice(0, this.notifications.length - 10);
+                            }
+                            setTimeout(() => {
+                                const idx = this.notifications.findIndex(n => n.id === id);
+                                if (idx >= 0) this.notifications.splice(idx, 1);
+                            }, durationMs);
+                        },
+
+                        /**
+                         * 注入/更新一个本地任务（不会被后端 /api/tasks/status 覆盖）。
+                         * @param {string} key   任务唯一标识（以 local_ 开头）
+                         * @param {string} label 任务标题
+                         * @param {string} message 当前阶段
+                         */
+                        upsertLocalTask(key, label, message = '处理中…') {
+                            if (!key) return;
+                            this.taskProgress[key] = {
+                                label: label || '任务',
+                                running: true,
+                                done: 0,
+                                total: 0,
+                                message: message,
+                                percent: 0,
+                                _local: true,
+                                ok: true,
+                                started_at: Date.now() / 1000,
+                                updated_at: Date.now() / 1000,
+                            };
+                        },
+
+                        /**
+                         * 结束本地任务：更新显示，popupDuration 秒后自动移除。
+                         * @param {string} key
+                         * @param {string} message 完成信息
+                         * @param {boolean} ok    是否成功
+                         */
+                        finishLocalTask(key, message, ok = true) {
+                            const t = this.taskProgress[key];
+                            if (!t) return;
+                            t.running = false;
+                            t.percent = 100;
+                            t.ok = !!ok;
+                            t.message = message || (ok ? '完成' : '失败');
+                            t.updated_at = Date.now() / 1000;
+                            const ms = Math.max(500, this.popupDuration * 1000);
+                            setTimeout(() => {
+                                if (this.taskProgress[key]) delete this.taskProgress[key];
+                            }, ms);
+                        },
+
                         onPageSizeChange() {
                             this.currentPage = 1;
                             try { localStorage.setItem('dmf_pageSize_v2', String(this.pageSize)); } catch (e) {}
@@ -1835,15 +2140,66 @@
                                 const res = await fetch('/api/tasks/status', { cache: 'no-store' });
                                 if (!res.ok) return;
                                 const data = await res.json();
-                                const hasRunning = Object.values(data).some(v => v && v.running);
+
+                                // ① 后端任务状态（用于"任务全部完成"判断）
+                                const hasRunningBackend = Object.values(data).some(v => v && v.running);
                                 const hadRunning = this._hadRunningTask === true;
-                                this.taskProgress = data;
-                                this._hadRunningTask = hasRunning;
-                                if (hadRunning && !hasRunning && !this.manualOperation) {
-                                    setTimeout(() => window.location.reload(), 400);
+
+                                // ② 合并本地任务（_local: true），避免被整体覆盖
+                                const merged = { ...data };
+                                for (const k of Object.keys(this.taskProgress)) {
+                                    const v = this.taskProgress[k];
+                                    if (v && v._local) merged[k] = v;
+                                }
+                                this.taskProgress = merged;
+                                this._hadRunningTask = hasRunningBackend;
+
+                                if (hadRunning && !hasRunningBackend && !this.manualOperation) {
+                                    setTimeout(() => this._refreshCurrentView(), 200);
                                 }
                             } catch (e) {}
                         },
+
+                        _refreshCurrentView() {
+                            const v = this.currentMainView;
+                            if (v === 'proxy') {
+                                this.reloadProxies();
+                            } else if (v === 'containers') {
+                                if (window.__updRefreshContainers) window.__updRefreshContainers();
+                            } else if (v === 'images') {
+                                if (window.__updRefreshImages) window.__updRefreshImages();
+                            } else if (v === 'logs') {
+                                if (window.__updPollLogs) window.__updPollLogs();
+                            }
+                        },
+                        async reloadProxies() {
+                            try {
+                                const res = await fetch('/api/proxies', { cache: 'no-store' });
+                                if (!res.ok) return;
+                                const data = await res.json();
+                                if (Array.isArray(data)) this.proxies = data;
+                            } catch (e) {}
+                        },
+
+                        async cancelUpdate(name) {
+                            if (!name) return;
+                            if (!confirm(`确认取消 ${name} 的更新？\n（已下载的镜像层会被 Docker 丢弃，容器状态不受影响）`)) return;
+                            try {
+                                const res = await fetch(`/api/updater/update/${encodeURIComponent(name)}/cancel`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                });
+                                if (!res.ok) {
+                                    let detail = res.statusText;
+                                    try { const j = await res.json(); detail = j.detail || detail; } catch (e) {}
+                                    throw new Error(detail);
+                                }
+                                this.pushNotification(`${name} 取消请求已提交`, 'ok');
+                            } catch (e) {
+                                this.pushNotification(`取消失败：${e.message}`, 'err');
+                            }
+                        },
+
                         async search() {
                             const q = (this.searchQuery || '').trim();
                             if (!q) { this.searchError = '请输入搜索关键词'; return; }
@@ -2116,6 +2472,8 @@
                                 this.configJsonStrings.manually_disabled = JSON.stringify(this.configForm.manually_disabled || [], null, 2);
                                 this.configJsonStrings.search_upstreams = JSON.stringify((this.configForm.search || {}).upstreams || [], null, 2);
                                 this.configJsonStrings.updater_mirrors = JSON.stringify((this.configForm.updater || {}).mirrors || ['local'], null, 2);
+                                const pd = Number((this.configForm.updater || {}).progress_popup_duration);
+                                if (!isNaN(pd) && pd > 0) this.popupDuration = pd;
                                 this.$nextTick(() => { this.configDirty = false; });
                                 this.configStatusType = 'success'; this.configStatus = '配置已载入';
                                 setTimeout(() => {
@@ -2123,7 +2481,9 @@
                                 }, 1500);
                             } catch (e) {
                                 this.configStatusType = 'error'; this.configStatus = `载入异常: ${e.message}`;
-                            } finally { this.configLoading = false; }
+                            } finally {
+                                this.configLoading = false;
+                            }
                         },
                         async saveConfig() {
                             const jsonFields = [
@@ -2154,13 +2514,17 @@
                                     this.configStatus = `保存失败 (HTTP ${res.status}): ${data.detail || JSON.stringify(data)}`;
                                     return;
                                 }
+                                const pd = Number(this.configForm.updater.progress_popup_duration);
+                                if (!isNaN(pd) && pd > 0) this.popupDuration = pd;
                                 this.configStatusType = 'success';
                                 this.configStatus = `✅ ${data.message || '配置已保存并重载'}${data.backup ? '\n备份：' + data.backup : ''}\n部分字段需要重启服务才能生效。`;
                                 this.configDirty = false;
                                 setTimeout(() => window.location.reload(), 2000);
                             } catch (e) {
                                 this.configStatusType = 'error'; this.configStatus = `保存异常: ${e.message}`;
-                            } finally { this.configSaving = false; }
+                            } finally {
+                                this.configSaving = false;
+                            }
                         },
                         closeConfigModal() {
                             if (this.configDirty && !confirm('有未保存的修改，确定要关闭吗？')) return;
@@ -2191,14 +2555,31 @@
             else if (name === 'logs') pollLogs();
         };
 
-        function toast(msg, kind = "ok", ms = 4000) {
+        function toast(msg, kind = "ok", ms = null) {
+            if (window.__vueApp && typeof window.__vueApp.pushNotification === "function") {
+                window.__vueApp.pushNotification(msg, kind, ms);
+                return;
+            }
             const el = $("#updToast");
             if (!el) return;
             el.textContent = msg;
             el.className = "toast " + kind;
             el.style.display = "block";
             clearTimeout(el._t);
-            el._t = setTimeout(() => { el.style.display = "none"; }, ms);
+            el._t = setTimeout(() => { el.style.display = "none"; }, ms || 4000);
+        }
+        window.__updToast = toast;
+
+        // 状态浮窗：本地任务辅助
+        function startLocalTask(key, label, message) {
+            if (window.__vueApp && typeof window.__vueApp.upsertLocalTask === "function") {
+                window.__vueApp.upsertLocalTask(key, label, message);
+            }
+        }
+        function finishLocalTask(key, message, ok = true) {
+            if (window.__vueApp && typeof window.__vueApp.finishLocalTask === "function") {
+                window.__vueApp.finishLocalTask(key, message, ok);
+            }
         }
 
         function escapeHtml(s) {
@@ -2246,6 +2627,69 @@
             return d.startsWith("sha256:") ? d.slice(7, 19) : d.slice(0, 12);
         }
 
+        function imageStatus(img) {
+            if (img.dangling) return "dangling";
+            if ((img.containers || 0) > 0) return "used";
+            return "unused";
+        }
+        function imageStatusRank(img) {
+            const s = imageStatus(img);
+            return s === "used" ? 0 : (s === "unused" ? 1 : 2);
+        }
+        const STATUS_LABEL = { used: "使用中", unused: "未使用", dangling: "悬空" };
+
+        function currentTagOf(image) {
+            if (!image) return "";
+            let ref = String(image);
+            if (ref.includes("@")) ref = ref.split("@")[0];
+            const slash = ref.lastIndexOf("/");
+            const colon = ref.lastIndexOf(":");
+            if (colon > slash) return ref.slice(colon + 1);
+            return "latest";
+        }
+        function baseOf(image) {
+            if (!image) return "";
+            let ref = String(image);
+            if (ref.includes("@")) ref = ref.split("@")[0];
+            const slash = ref.lastIndexOf("/");
+            const colon = ref.lastIndexOf(":");
+            if (colon > slash) return ref.slice(0, colon);
+            return ref;
+        }
+        function tagKind(tag) {
+            if (!tag) return "other";
+            const t = String(tag).toLowerCase();
+            const floating = [
+                "latest", "stable", "edge", "nightly", "main", "master",
+                "dev", "develop", "testing", "test", "beta", "alpha", "rc",
+                "canary", "rolling", "current", "unstable", "experimental",
+                "next", "preview",
+            ];
+            if (floating.includes(t)) return "floating";
+            if (/^v?\d+(\.\d+)*([\-_.].*)?$/i.test(t)) return "pinned";
+            return "other";
+        }
+
+        const TAG_KIND_LABEL = {
+            floating: "浮动标签",
+            pinned: "固定版本",
+            custom: "指定 tag",
+            other: "其他标签",
+        };
+
+        function computeTargetRef(currentImage, strategy, targetTag) {
+            const base = baseOf(currentImage);
+            if (!base) return "";
+            const currentTag = currentTagOf(currentImage);
+            const s = (strategy || "track").toLowerCase();
+            if (s === "pin") {
+                const t = (targetTag || "").trim();
+                return `${base}:${t || currentTag}`;
+            }
+            if (s === "latest") return `${base}:latest`;
+            return `${base}:${currentTag}`;
+        }
+
         const updState = {
             containers: [], images: [], results: {},
             last_check: null, selected: new Set(), checking: false,
@@ -2265,12 +2709,19 @@
                 const r2 = updState.results[c2.name] || {};
                 let v1, v2;
                 switch (key) {
+                    case "tag_kind": {
+                        const rank = (c) => {
+                            const k = tagKind(currentTagOf(c.image));
+                            return k === "pinned" ? 0 : (k === "floating" ? 1 : 2);
+                        };
+                        v1 = rank(c1); v2 = rank(c2);
+                        break;
+                    }
                     case "image": v1 = c1.image || ""; v2 = c2.image || ""; break;
                     case "target_image":
                         v1 = r1.target_image || c1.image || "";
                         v2 = r2.target_image || c2.image || "";
                         break;
-                    case "strategy": v1 = c1.strategy || "track"; v2 = c2.strategy || "track"; break;
                     case "status": v1 = c1.running ? 0 : 1; v2 = c2.running ? 0 : 1; break;
                     case "update": {
                         const rank = (r) => r.error ? 2 : (r.update_available ? 0 : (r.remote_digest ? 1 : 3));
@@ -2335,12 +2786,8 @@
             if (window.__vueApp) window.__vueApp.updImageCount = n;
         }
 
-        // ============================================================
-        //  顶栏容器状态统计刷新
-        // ============================================================
         async function refreshSummary() {
             try {
-                // 容器统计
                 const results = await api(`${U}/results`);
                 const all = results.results || [];
                 let updatable = 0, error = 0;
@@ -2348,11 +2795,12 @@
                     if (r.error) error++;
                     else if (r.update_available) updatable++;
                 }
-                // 悬空镜像统计
-                let dangling = 0;
+                let dangling = 0, unused = 0;
                 try {
                     const images = await api(`${U}/images`);
-                    dangling = (images || []).filter(i => i.dangling).length;
+                    const list = images || [];
+                    dangling = list.filter(i => i.dangling).length;
+                    unused = list.filter(i => !i.dangling && (i.containers || 0) === 0).length;
                 } catch (e) { /* 忽略 */ }
 
                 if (window.__vueApp) {
@@ -2360,12 +2808,25 @@
                         total: all.length,
                         updatable,
                         error,
+                        unused,
                         dangling,
                         checking: results.checking ? 1 : 0,
                     };
                 }
             } catch (e) { /* 静默 */ }
         }
+
+        async function cancelUpdate(name) {
+            if (!name) return;
+            if (!confirm(`确认取消 ${name} 的更新？\n（已下载的镜像层会被 Docker 丢弃，容器状态不受影响）`)) return;
+            try {
+                await api(`${U}/update/${encodeURIComponent(name)}/cancel`, { method: "POST" });
+                toast(`${name} 取消请求已提交`, "ok");
+            } catch (e) {
+                toast(`取消失败：${e.message}`, "err");
+            }
+        }
+        window.__updCancelUpdate = cancelUpdate;
 
         function renderContainers() {
             const tbody = $("#updContainersBody");
@@ -2386,27 +2847,47 @@
                     : `<span class="updater-badge b-stop">${escapeHtml(c.status || "已停止")}</span>`;
                 let updateCell;
                 if (c.is_self) updateCell = '<span class="updater-badge b-stop">自身</span>';
+                else if (c.updating) {
+                    updateCell = c.cancelling
+                        ? '<span class="updater-badge b-cancel">取消中…</span>'
+                        : '<span class="updater-badge b-up">更新中</span>';
+                }
                 else if (chk.error) updateCell = `<span class="updater-badge b-err" title="${escapeHtml(chk.error)}">错误</span>`;
                 else if (chk.update_available) updateCell = '<span class="updater-badge b-up">有更新</span>';
                 else if (chk.remote_digest) updateCell = '<span class="updater-badge b-ok">已最新</span>';
                 else updateCell = '<span class="updater-badge b-stop">未检测</span>';
 
-                const strategy = c.strategy || "track";
-                const policySelect = `
-                    <select class="upd-select" data-name="${escapeHtml(c.name)}" data-role="strategy">
-                        <option value="track" ${strategy === "track" ? "selected" : ""}>跟踪当前标签</option>
-                        <option value="latest" ${strategy === "latest" ? "selected" : ""}>最新标签</option>
-                        <option value="pin" ${strategy === "pin" ? "selected" : ""}>指定版本</option>
-                    </select>`;
-                const tagInput = strategy === "pin"
-                    ? `<input type="text" class="upd-input" style="width:110px;margin-left:6px;display:inline-block" data-name="${escapeHtml(c.name)}" data-role="tag" placeholder="例如 1.25.3" value="${escapeHtml(c.target_tag || "")}" />`
-                    : "";
+                const currentTag = currentTagOf(c.image);
+                const kindClass = tagKind(currentTag);
+                const kindLabel = TAG_KIND_LABEL[kindClass] || TAG_KIND_LABEL.other;
+                const tagKindCell = `<span class="tag-kind ${kindClass}" title="${kindLabel} · 当前 tag：${escapeHtml(currentTag)}">${escapeHtml(currentTag)}</span>`;
+
+                const strategy = (c.strategy || "track").toLowerCase();
+                const isPin = strategy === "pin" && (c.target_tag || "").trim();
+
+                let displayTarget;
+                if (isPin) {
+                    displayTarget = computeTargetRef(c.image, "pin", (c.target_tag || "").trim());
+                } else {
+                    displayTarget = c.image || "—";
+                }
+
+                const remoteMeta = `远程: ${shortDigest(chk.remote_digest)}${chk.source ? " · " + chk.source : ""}`;
+
                 const updating = c.updating ? `<span class="updater-badge b-up ml-1">${escapeHtml(c.updating)}</span>` : "";
                 const canUpdate = !c.is_self && !c.updating;
                 const checking = containerChecking.has(c.name) || !!c.checking;
                 const canCheck = !c.is_self;
                 const checkBtn = `<button class="upd-btn ghost mini" data-name="${escapeHtml(c.name)}" data-role="check" ${canCheck && !checking ? "" : "disabled"}>${checking ? "检测中…" : "检测"}</button>`;
-                const updateBtn = `<button class="upd-btn mini" data-name="${escapeHtml(c.name)}" data-role="update" ${canUpdate ? "" : "disabled"}>更新</button>`;
+
+                let updateBtn;
+                if (c.updating) {
+                    updateBtn = `<button class="upd-btn danger mini" data-name="${escapeHtml(c.name)}" data-role="cancel-update">取消</button>`;
+                } else {
+                    updateBtn = `<button class="upd-btn mini" data-name="${escapeHtml(c.name)}" data-role="update" ${canUpdate ? "" : "disabled"}>更新</button>`;
+                }
+
+                const changeTagBtn = `<button class="upd-btn ghost mini" data-name="${escapeHtml(c.name)}" data-role="change-tag" ${c.updating ? "disabled" : ""} title="更改检测/更新的目标 tag">tag</button>`;
 
                 let selectCell;
                 if (c.is_self) selectCell = "<td></td>";
@@ -2416,16 +2897,17 @@
                     selectCell = `<td><input type="checkbox" data-role="select" data-name="${escapeHtml(c.name)}" ${checked} ${disabled} /></td>`;
                 }
                 const slotBadge = (chk.slot != null) ? `<span class="text-xs text-gray-400 ml-1" title="上次检测使用的并发槽位">· C${chk.slot}</span>` : "";
+
                 return `
                     <tr>
                         ${selectCell}
-                        <td><strong>${escapeHtml(c.name)}</strong>${updating}<div class="text-xs text-gray-400">${escapeHtml(c.short_id)}</div></td>
-                        <td><code>${escapeHtml(c.image || "—")}</code><div class="text-xs text-gray-400">本地: ${shortDigest(chk.local_digest)}</div></td>
-                        <td><code>${escapeHtml(chk.target_image || c.image || "—")}</code><div class="text-xs text-gray-400">远程: ${shortDigest(chk.remote_digest)}${chk.source ? " · " + escapeHtml(chk.source) : ""}</div></td>
-                        <td>${policySelect}${tagInput}<div style="margin-top:6px"><button class="upd-btn ghost mini" data-name="${escapeHtml(c.name)}" data-role="save-policy">保存策略</button></div></td>
+                        <td title="${escapeHtml(c.name)}"><strong>${escapeHtml(c.name)}</strong>${updating}<div class="text-xs text-gray-400">${escapeHtml(c.short_id)}</div></td>
+                        <td class="tag-col-cell">${tagKindCell}</td>
+                        <td title="${escapeHtml(c.image || "")}"><code>${escapeHtml(c.image || "—")}</code><div class="text-xs text-gray-400">本地: ${shortDigest(chk.local_digest)}</div></td>
+                        <td class="target-cell" title="${escapeHtml(displayTarget)}"><code class="target-path">${escapeHtml(displayTarget)}</code><div class="target-meta" title="${escapeHtml(remoteMeta)}">${escapeHtml(remoteMeta)}</div></td>
                         <td>${runningBadge}</td>
                         <td>${updateCell}${slotBadge}</td>
-                        <td><div class="flex gap-1.5 flex-wrap">${checkBtn}${updateBtn}</div></td>
+                        <td class="op-cell"><div class="op-row">${checkBtn}${updateBtn}${changeTagBtn}</div></td>
                     </tr>`;
             });
             tbody.innerHTML = rows.join("");
@@ -2437,28 +2919,7 @@
                     syncSelectionUI();
                 });
             });
-            tbody.querySelectorAll('[data-role="strategy"]').forEach(sel => {
-                sel.addEventListener("change", () => {
-                    const c = list.find(x => x.name === sel.dataset.name);
-                    if (c) c.strategy = sel.value;
-                    renderContainers();
-                });
-            });
-            tbody.querySelectorAll('[data-role="save-policy"]').forEach(btn => {
-                btn.addEventListener("click", async () => {
-                    const name = btn.dataset.name;
-                    const sel = tbody.querySelector(`[data-role="strategy"][data-name="${name}"]`);
-                    const tagEl = tbody.querySelector(`[data-role="tag"][data-name="${name}"]`);
-                    try {
-                        await api(`${U}/containers/${encodeURIComponent(name)}/policy`, {
-                            method: "PUT",
-                            body: JSON.stringify({ strategy: sel.value, target_tag: tagEl ? tagEl.value : "" }),
-                        });
-                        toast("策略已保存");
-                        await refreshContainers();
-                    } catch (e) { toast(e.message, "err"); }
-                });
-            });
+
             tbody.querySelectorAll('[data-role="check"]').forEach(btn => {
                 btn.addEventListener("click", async () => {
                     const name = btn.dataset.name;
@@ -2479,20 +2940,88 @@
                     finally { containerChecking.delete(name); renderContainers(); }
                 });
             });
+
             tbody.querySelectorAll('[data-role="update"]').forEach(btn => {
                 btn.addEventListener("click", async () => {
                     const name = btn.dataset.name;
                     if (!confirm(`确认更新容器 ${name}？\n将拉取新镜像并在必要时重建容器。`)) return;
                     btn.disabled = true; btn.textContent = "更新中…";
                     try {
-                        await api(`${U}/update/${encodeURIComponent(name)}`, { method: "POST" });
-                        toast(`${name} 更新完成`);
+                        const res = await api(`${U}/update/${encodeURIComponent(name)}`, { method: "POST" });
+                        const r = (res && res.result) || {};
+                        if (r.cancelled) {
+                            toast(`${name} 更新已取消`, "ok", 5000);
+                        } else {
+                            toast(`${name} 更新完成`);
+                        }
                         updState.selected.delete(name);
                         await refreshContainers();
                         await refreshSummary();
                         if (window.__currentMainView === "logs") await pollLogs();
                     } catch (e) { toast(`${name} 更新失败：${e.message}`, "err", 8000); }
                     finally { btn.disabled = false; btn.textContent = "更新"; }
+                });
+            });
+
+            tbody.querySelectorAll('[data-role="cancel-update"]').forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    await cancelUpdate(btn.dataset.name);
+                    await refreshContainers();
+                });
+            });
+
+            tbody.querySelectorAll('[data-role="change-tag"]').forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    const name = btn.dataset.name;
+                    const c = list.find(x => x.name === name);
+                    if (!c) return;
+                    const currentTag = currentTagOf(c.image);
+                    const currentPin = (c.strategy === "pin") ? (c.target_tag || "") : "";
+                    const base = baseOf(c.image);
+
+                    const msg =
+                        `更改 ${name} 的检测/更新 tag\n\n` +
+                        `容器当前 tag：${currentTag}\n` +
+                        `镜像仓库：${base}\n` +
+                        `当前状态：${currentPin ? `指定 tag = ${currentPin}` : "自动（跟随当前 tag）"}\n\n` +
+                        `· 留空 → 恢复自动（使用容器当前 tag）\n` +
+                        `· 输入其他值 → 使用该 tag（如 1.26、latest）`;
+                    const input = prompt(msg, currentPin);
+                    if (input === null) return;
+                    const newTag = (input || "").trim();
+
+                    let strategy, targetTag;
+                    if (!newTag || newTag === currentTag) {
+                        strategy = "track";
+                        targetTag = "";
+                    } else {
+                        strategy = "pin";
+                        targetTag = newTag;
+                    }
+
+                    try {
+                        await api(`${U}/containers/${encodeURIComponent(name)}/policy`, {
+                            method: "PUT",
+                            body: JSON.stringify({ strategy, target_tag: targetTag }),
+                        });
+                        toast(strategy === "pin"
+                            ? `${name} 已指定 tag：${targetTag}`
+                            : `${name} 已恢复自动（跟随当前 tag）`);
+
+                        try {
+                            const res = await api(`${U}/containers/${encodeURIComponent(name)}/check`, { method: "POST" });
+                            if (res && res.result) updState.results[name] = res.result;
+                            const r = (res && res.result) || {};
+                            if (r.error) toast(`${name} 检测失败：${r.error}`, "err", 6000);
+                            else if (r.update_available) toast(`${name} 检测完成：发现新版本`, "ok", 5000);
+                        } catch (e) {
+                            toast(`策略已保存，但检测失败：${e.message}`, "err", 6000);
+                        }
+
+                        await refreshContainers();
+                        await refreshSummary();
+                        if (window.__currentMainView === "logs") await pollLogs();
+                    } catch (e) { toast(e.message, "err"); }
                 });
             });
 
@@ -2530,13 +3059,17 @@
             btn.disabled = true;
             btn.textContent = `更新中… (${names.length})`;
             const results = await Promise.allSettled(names.map(async (name) => {
-                try { await api(`${U}/update/${encodeURIComponent(name)}`, { method: "POST" }); return { name, ok: true }; }
+                try { const r = await api(`${U}/update/${encodeURIComponent(name)}`, { method: "POST" }); return { name, ok: true, cancelled: !!((r && r.result) || {}).cancelled }; }
                 catch (e) { return { name, ok: false, error: e.message }; }
             }));
             const ok = results.filter(r => r.status === "fulfilled" && r.value.ok).length;
             const fail = results.length - ok;
-            if (fail === 0) toast(`批量更新完成：${ok} 个容器已更新`, "ok", 6000);
-            else {
+            const cancelledCount = results.filter(r => r.status === "fulfilled" && r.value.ok && r.value.cancelled).length;
+            if (fail === 0) {
+                let msg = `批量更新完成：${ok} 个容器已处理`;
+                if (cancelledCount > 0) msg += `（其中 ${cancelledCount} 个已取消）`;
+                toast(msg, "ok", 6000);
+            } else {
                 const failedNames = results.filter(r => r.status === "fulfilled" && !r.value.ok).map(r => r.value.name).join("、");
                 toast(`批量更新完成：成功 ${ok} 个，失败 ${fail} 个（${failedNames}）`, "err", 10000);
             }
@@ -2572,6 +3105,9 @@
             copy.sort((a, b) => {
                 let v1, v2;
                 switch (key) {
+                    case "status":
+                        v1 = imageStatusRank(a); v2 = imageStatusRank(b);
+                        break;
                     case "tags":
                         v1 = (a.tags && a.tags[0]) || "\uffff"; v2 = (b.tags && b.tags[0]) || "\uffff"; break;
                     case "id": v1 = a.id || ""; v2 = b.id || ""; break;
@@ -2594,26 +3130,33 @@
             setImageCount(list.length);
             const totalSize = list.reduce((s, i) => s + (i.size || 0), 0);
             const danglingCount = list.filter(i => i.dangling).length;
+            const unusedCount = list.filter(i => !i.dangling && (i.containers || 0) === 0).length;
+            const usedCount = list.filter(i => !i.dangling && (i.containers || 0) > 0).length;
             const sum = $("#updImgSummary");
             if (sum) {
                 sum.textContent = `共 ${list.length} 个镜像 · ${formatBytes(totalSize)}` +
+                    (usedCount > 0 ? ` · 使用中 ${usedCount} 个` : "") +
+                    (unusedCount > 0 ? ` · 未使用 ${unusedCount} 个` : "") +
                     (danglingCount > 0 ? ` · 悬空 ${danglingCount} 个` : "");
             }
             if (!list.length) {
-                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-gray-400 py-8">无镜像</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-400 py-8">无镜像</td></tr>';
                 updateSortIndicators("#updImagesTable", imageSort);
                 return;
             }
             const rows = list.map(img => {
+                const st = imageStatus(img);
+                const statusHtml = `<span class="img-badge ${st}"><span class="dot"></span>${STATUS_LABEL[st]}</span>`;
                 const tagsHtml = (img.tags && img.tags.length)
-                    ? `<div class="tag-list">${img.tags.map(t => `<code>${escapeHtml(t)}</code>`).join("")}</div>`
+                    ? `<div class="tag-list">${img.tags.map(t => `<code title="${escapeHtml(t)}">${escapeHtml(t)}</code>`).join("")}</div>`
                     : '<span class="text-gray-400 text-xs">&lt;none&gt;:&lt;none&gt;</span>';
                 const containers = (img.containers == null) ? 0 : img.containers;
                 const label = (img.tags && img.tags[0]) || img.short_id || img.id;
                 return `
                     <tr>
+                        <td>${statusHtml}</td>
                         <td>${tagsHtml}</td>
-                        <td><code>${escapeHtml(img.short_id || "")}</code></td>
+                        <td><code title="${escapeHtml(img.id || "")}">${escapeHtml(img.short_id || "")}</code></td>
                         <td>${formatBytes(img.size)}</td>
                         <td><span class="text-xs text-gray-500">${escapeHtml(formatDate(img.created))}</span></td>
                         <td>${containers}</td>
@@ -2643,19 +3186,69 @@
                 await refreshSummary();
             } catch (e) { toast(`删除失败：${e.message}`, "err", 8000); }
         }
+
+        // ============================================================
+        //  清理悬空镜像 —— 进度显示在状态浮窗
+        // ============================================================
         async function pruneImages() {
-            if (!confirm("确认清理所有悬空镜像（<none>:<none>）？")) return;
+            if (!confirm("确认清理所有悬空镜像（<none>:<none>）？\n仅删除无标签镜像，不影响正在运行的容器。")) return;
+            const TASK_KEY = "local_prune_dangling";
             const btn = $("#btnUpdPruneImages");
-            const old = btn.textContent;
-            btn.disabled = true;
-            btn.textContent = "清理中…";
+            const old = btn ? btn.textContent : "";
+            if (btn) { btn.disabled = true; btn.textContent = "清理中…"; }
+
+            startLocalTask(TASK_KEY, "清理悬空镜像", "正在删除无标签镜像…");
+
             try {
                 const res = await api(`${U}/images/prune`, { method: "POST" });
-                toast(`清理完成：删除 ${res.deleted_count || 0} 个镜像，释放 ${formatBytes(res.space_reclaimed || 0)}`, "ok", 6000);
+                const del = res.deleted_count || 0;
+                const freed = res.space_reclaimed || 0;
+                finishLocalTask(TASK_KEY, `删除 ${del} 个镜像，释放 ${formatBytes(freed)}`, true);
                 await refreshImages();
                 await refreshSummary();
-            } catch (e) { toast("清理失败：" + e.message, "err"); }
-            finally { btn.disabled = false; btn.textContent = old; }
+            } catch (e) {
+                finishLocalTask(TASK_KEY, `清理失败：${e.message}`, false);
+                toast(`清理失败：${e.message}`, "err", 8000);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = old; }
+            }
+        }
+
+        // ============================================================
+        //  清理未使用镜像 —— 进度显示在状态浮窗
+        // ============================================================
+        async function pruneUnusedImages() {
+            const unusedCount = (updState.images || []).filter(i => !i.dangling && (i.containers || 0) === 0).length;
+            const extra = unusedCount > 0 ? `\n将删除 ${unusedCount} 个镜像。` : "";
+            if (!confirm(`确认清理所有未使用镜像（有标签但无任何容器引用）？${extra}\n\n⚠️ 此操作不可恢复，可能包含手动拉取但暂未使用的基础镜像。`)) return;
+
+            const TASK_KEY = "local_prune_unused";
+            const btn = $("#btnUpdPruneUnusedImages");
+            const old = btn ? btn.textContent : "";
+            if (btn) { btn.disabled = true; btn.textContent = "清理中…"; }
+
+            startLocalTask(
+                TASK_KEY,
+                "清理未使用镜像",
+                unusedCount > 0 ? `正在删除 ${unusedCount} 个镜像…` : "正在扫描并删除…"
+            );
+
+            try {
+                const res = await api(`${U}/images/prune-unused`, { method: "POST" });
+                const del = res.deleted_count || 0;
+                const failed = res.failed_count || 0;
+                const freed = res.space_reclaimed || 0;
+                const msg = `删除 ${del} 个镜像` + (failed > 0 ? `（失败 ${failed} 个）` : "") + `，释放 ${formatBytes(freed)}`;
+                finishLocalTask(TASK_KEY, msg, failed === 0);
+                if (failed > 0) toast(`清理未使用镜像：${msg}`, "err", 8000);
+                await refreshImages();
+                await refreshSummary();
+            } catch (e) {
+                finishLocalTask(TASK_KEY, `清理失败：${e.message}`, false);
+                toast("清理失败：" + e.message, "err", 8000);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = old; }
+            }
         }
 
         const LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
@@ -2757,6 +3350,11 @@
                 btnPrune.dataset.bound = "1";
                 btnPrune.addEventListener("click", pruneImages);
             }
+            const btnPruneUnused = $("#btnUpdPruneUnusedImages");
+            if (btnPruneUnused && !btnPruneUnused.dataset.bound) {
+                btnPruneUnused.dataset.bound = "1";
+                btnPruneUnused.addEventListener("click", pruneUnusedImages);
+            }
             const btnBatch = $("#btnUpdBatchUpdate");
             if (btnBatch && !btnBatch.dataset.bound) {
                 btnBatch.dataset.bound = "1";
@@ -2798,6 +3396,16 @@
             setTimeout(() => { obs.disconnect(); cb(); }, 3000);
         }
 
+        window.__updRefreshContainers = async () => {
+            await refreshContainers();
+            await refreshSummary();
+        };
+        window.__updRefreshImages = async () => {
+            await refreshImages();
+            await refreshSummary();
+        };
+        window.__updPollLogs = pollLogs;
+
         waitForAppReady(() => {
             bindAll();
             updateLogLevelBadge();
@@ -2809,7 +3417,6 @@
         setInterval(async () => {
             if (window.__currentMainView === "containers") await refreshContainers();
         }, 10000);
-        // 顶栏统计每 15 秒刷新一次（无论当前视图）
         setInterval(refreshSummary, 15000);
         setInterval(() => { if (window.__currentMainView === "logs") pollLogs(); }, 3000);
     })();

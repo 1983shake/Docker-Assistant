@@ -54,6 +54,9 @@ async def index(request: Request):
     pull_history = traffic_logger.get_pull_history(limit=200)
     total_download = sum(s.download_bytes for s in stats)
 
+    # 【新增】状态浮窗展示时长（秒）：供首屏注入到前端
+    popup_duration = getattr(config.updater, "progress_popup_duration", 3) or 3
+
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -67,6 +70,8 @@ async def index(request: Request):
             "total_download": total_download,
             "pull_stats": pull_stats,
             "pull_history": [p.model_dump(mode="json") for p in pull_history],
+            # 状态浮窗展示时长
+            "popup_duration": popup_duration,
             # 容器更新器初始状态（供融合页面首屏渲染）
             "updater_enabled": config.updater.enabled,
             "updater_settings": {

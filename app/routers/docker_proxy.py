@@ -21,10 +21,6 @@ DOCKER_AUTH_URL = "https://auth.docker.io/token"
 
 RETRYABLE_STATUS_CODES = (403, 500, 502, 503, 504)
 
-# manifests 请求遇到 404 也视为该节点不可用：
-#   某些镜像节点对特定镜像（尤其是 Docker Hub 官方 library/*）会返回 404，
-#   但镜像实际存在，换个节点即可拉取成功。
-#   注意：404 不计入节点熔断，避免因请求不存在的镜像误伤健康节点。
 MANIFEST_RETRYABLE_STATUS_CODES = RETRYABLE_STATUS_CODES + (404,)
 
 REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
@@ -36,16 +32,6 @@ _MAX_TOKEN_CACHE = 200
 
 # ============================================================
 #  超时构造
-#
-#  v1.1.9 起按路径类型返回 httpx.Timeout 对象，而不是单一 float，
-#  以便对 blobs 单独放开「读取」超时：
-#
-#    - connect / write / pool 保留配置的短超时（快速失败、避免卡死）
-#    - blobs 的 read 默认不限制（None），避免流式传输中途触发 ReadTimeout
-#      可通过 config.proxy.blob_read_timeout 设置上限
-#
-#  v1.2.0 起，「响应头阶段」和「首字节阶段」的挂起超时不再交给 httpx，
-#  而是由 proxy_v2 / iter_response 中的 asyncio.wait_for 处理。
 # ============================================================
 def _get_timeout(path: str) -> httpx.Timeout:
     tbp = config.proxy.timeout_by_path
@@ -57,7 +43,6 @@ def _get_timeout(path: str) -> httpx.Timeout:
         return httpx.Timeout(tbp.manifests)
 
     if "/blobs/" in path:
-        # blob 流式传输：连接 / 写入 / 池使用配置值，读取单独处理
         blob_read = config.proxy.blob_read_timeout
         read_timeout: Optional[float] = None
         if blob_read is not None and blob_read > 0:
@@ -240,6 +225,66 @@ def _extract_image_name(path: str) -> str | None:
     return None
 
 
+# ============================================================
+#  预热探测：blob 响应进入正式转发前，先下载一段数据测速
+# ============================================================
+async def _warmup_check_blob(
+    response: httpx.Response,
+    warmup_seconds: float,
+    threshold_bps: int,
+) -> tuple[bool, bytes, float]:
+    """
+    预热探测 blob 流。
+
+    从上游响应中读取 warmup_seconds 秒的数据到内存，测量平均下载速度。
+
+    返回 (ok, buffered_bytes, speed_bps)：
+      - ok:             是否达标（若数据提前下完，视为达标）
+      - buffered_bytes: 已下载数据（必须交给 iter_response 继续发送）
+      - speed_bps:      平均速度（字节/秒）
+    """
+    chunks: list[bytes] = []
+    total = 0
+    start = time.time()
+    aiter = response.aiter_bytes(chunk_size=config.proxy.stream_chunk_size)
+
+    try:
+        while True:
+            elapsed = time.time() - start
+            remaining = warmup_seconds - elapsed
+            if remaining <= 0:
+                break
+            try:
+                # 单个 chunk 的等待时间不超过剩余窗口 + 2s 缓冲
+                chunk = await asyncio.wait_for(
+                    aiter.__anext__(),
+                    timeout=remaining + 2.0,
+                )
+            except StopAsyncIteration:
+                # 数据已全部下载完
+                break
+            except asyncio.TimeoutError:
+                # 长时间没有新数据
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except Exception as e:
+        logger.debug(f"预热探测异常: {type(e).__name__}: {e}")
+
+    elapsed = time.time() - start
+    speed = total / elapsed if elapsed > 0 else 0.0
+
+    # 数据提前读完 → 视为达标（小 blob 不值得预热判断）
+    if elapsed < warmup_seconds:
+        return True, b"".join(chunks), speed
+
+    ok = speed >= threshold_bps
+    return ok, b"".join(chunks), speed
+
+
+# ============================================================
+#  核心代理逻辑
+# ============================================================
 async def proxy_v2(path: str, request: Request) -> Response:
     """核心代理逻辑：按速度排序依次尝试所有节点，全失败则停止。"""
     client_ip = request.client.host if request.client else "unknown"
@@ -281,10 +326,8 @@ async def proxy_v2(path: str, request: Request) -> Response:
 
     _is_manifest_request = bool(path and "/manifests/" in path)
     _is_blob_request = bool(path and "/blobs/" in path)
-    # 标签 manifest（非 sha256:）—— 只有这种才是拉取入口，用于登记待定拉取
     _is_tag_manifest = bool(_is_manifest_request and image_name and image_tag and not image_tag.startswith("sha256:"))
 
-    # manifests 请求：404 也视为该节点不可用，继续尝试下一个候选
     _retryable_codes = MANIFEST_RETRYABLE_STATUS_CODES if _is_manifest_request else RETRYABLE_STATUS_CODES
 
     # ===== 获取候选节点 =====
@@ -305,7 +348,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
         if key.lower() not in ("host", "content-length"):
             headers_list.append((key, value))
 
-    # v1.1.9: 返回 httpx.Timeout 对象；blobs 路径的 read 超时默认不限制
     timeout = _get_timeout(path)
     _path_type = "blobs" if _is_blob_request else ("manifests" if _is_manifest_request else "probe")
 
@@ -318,11 +360,15 @@ async def proxy_v2(path: str, request: Request) -> Response:
     proxy_node: ProxyNode | None = None
     last_error = None
     attempts_log: list[str] = []
+    warmup_buffer: bytes = b""  # 预热阶段已下载的数据（需在正式转发前发送）
 
-    # v1.2.0：blobs 路径「响应头接收阶段」的硬上限
     _header_to = config.proxy.blob_header_timeout
     if _header_to is not None and _header_to <= 0:
         _header_to = None
+
+    _warmup_seconds = float(getattr(config.proxy, "warmup_seconds", 0) or 0)
+    _low_threshold = int(getattr(config.proxy, "low_speed_threshold", 0) or 0)
+    _low_duration = float(getattr(config.proxy, "low_speed_duration", 0) or 0)
 
     for idx, (node, adjusted_path) in enumerate(candidates, start=1):
         upstream_url = f"{node.url.rstrip('/')}/v2/{adjusted_path}"
@@ -333,32 +379,17 @@ async def proxy_v2(path: str, request: Request) -> Response:
             f"尝试节点 [{idx}/{len(candidates)}]: {node.name} ({node.url}) "
             f"type={_path_type} connect_timeout={timeout.connect}s read_timeout={timeout.read}"
             + (f" header_timeout={_header_to}s" if _is_blob_request and _header_to else "")
+            + (f" warmup={_warmup_seconds}s" if _is_blob_request and _warmup_seconds > 0 else "")
         )
 
         try:
             if _is_blob_request and _header_to:
-                # v1.2.0：用 asyncio.wait_for 给「响应头接收阶段」加硬上限，
-                # 避免节点完全不响应时整个请求永久挂起
                 r = await asyncio.wait_for(
-                    _send_with_auth(
-                        client,
-                        request.method,
-                        upstream_url,
-                        headers_list,
-                        content,
-                        node,
-                    ),
+                    _send_with_auth(client, request.method, upstream_url, headers_list, content, node),
                     timeout=_header_to,
                 )
             else:
-                r = await _send_with_auth(
-                    client,
-                    request.method,
-                    upstream_url,
-                    headers_list,
-                    content,
-                    node,
-                )
+                r = await _send_with_auth(client, request.method, upstream_url, headers_list, content, node)
         except asyncio.TimeoutError:
             last_error = f"header timeout ({_header_to}s)"
             logger.warning(f"节点 {node.name} 响应头超时: {last_error}")
@@ -395,7 +426,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 await r.aclose()
             except Exception:
                 pass
-            # 404 不计入熔断：它更可能是"该节点没有这个镜像"而非"节点故障"
             if node.id is not None and r.status_code != 404:
                 proxy_manager.mark_node_failed(node.id, reason)
                 if r.status_code == 403:
@@ -422,7 +452,46 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 continue
             r = new_r
 
-        # 成功
+        # ============================================================
+        # 【新增】blob 预热测速
+        #   在把响应发给客户端之前，先下载一小段数据评估速度，
+        #   低速则切换下一个候选节点（客户端完全无感知）。
+        # ============================================================
+        if _is_blob_request and _warmup_seconds > 0 and _low_threshold > 0:
+            warmup_ok, warmup_chunks, warmup_speed = await _warmup_check_blob(
+                r,
+                _warmup_seconds,
+                _low_threshold,
+            )
+            if not warmup_ok:
+                speed_kb = warmup_speed / 1024.0
+                thr_kb = _low_threshold / 1024.0
+                logger.warning(
+                    f"节点 {node.name} 预热测速不达标：{speed_kb:.1f} KB/s " f"< {thr_kb:.1f} KB/s（窗口 {_warmup_seconds:.1f}s），切换下一个候选"
+                )
+                attempts_log.append(f"{node.name}:warmup-slow({speed_kb:.0f}KB/s)")
+                try:
+                    await r.aclose()
+                except Exception:
+                    pass
+                if node.id is not None:
+                    proxy_manager.mark_node_failed(
+                        node.id,
+                        "warmup-low-speed",
+                        cooldown=config.proxy.fail_cooldown,
+                    )
+                    proxy_manager.mark_blob_failed(node.id, path)
+                r = None
+                continue
+            else:
+                speed_kb = warmup_speed / 1024.0
+                logger.info(
+                    f"节点 {node.name} 预热通过：{speed_kb:.1f} KB/s"
+                    + (f"（已缓冲 {len(warmup_chunks)} 字节）" if warmup_chunks else "（数据已下完）")
+                )
+            warmup_buffer = warmup_chunks or b""
+
+        # ===== 成功采用该节点 =====
         if node.id is not None:
             proxy_manager.mark_node_success(node.id)
             proxy_manager.pin_node_for_path(path, node)
@@ -438,7 +507,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
         summary = " | ".join(attempts_log) if attempts_log else (last_error or "unknown")
         logger.error(f"所有候选节点均失败: {summary}")
 
-        # 全部因 404 而失败 → 判定为镜像不存在，返回标准 404
         if _is_manifest_request and attempts_log and all(":HTTP 404" in a for a in attempts_log):
             return Response(
                 content='{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}',
@@ -452,8 +520,7 @@ async def proxy_v2(path: str, request: Request) -> Response:
             media_type="application/json",
         )
 
-    # ===== 登记待定拉取（只写内存，不落库） =====
-    # 只有"标签 manifest"成功时才登记。真正落库发生在 blob 到达之后。
+    # ===== 登记待定拉取 =====
     if _is_tag_manifest:
         real_ip = request.headers.get("x-forwarded-for", client_ip)
         try:
@@ -490,15 +557,42 @@ async def proxy_v2(path: str, request: Request) -> Response:
     real_client_ip = request.headers.get("x-forwarded-for", client_ip)
     _node_id = proxy_node.id
 
-    # v1.2.0：首字节超时（只作用于 blobs 路径）
     _first_byte_to = config.proxy.blob_first_byte_timeout
     if _first_byte_to is not None and _first_byte_to <= 0:
         _first_byte_to = None
 
     async def iter_response():
+        nonlocal warmup_buffer
+
         total_downloaded = 0
         recorded = False
         first_chunk = True
+
+        # 低速监测样本：(timestamp, cumulative_bytes)
+        speed_samples: list[tuple[float, int]] = []
+
+        def _update_speed_samples():
+            now = time.time()
+            speed_samples.append((now, total_downloaded))
+            # 保留窗口外的样本（至少保留 2 个用于计算）
+            cutoff = now - (_low_duration if _low_duration > 0 else 10.0)
+            while len(speed_samples) > 2 and speed_samples[0][0] < cutoff:
+                speed_samples.pop(0)
+
+        def _is_low_speed() -> bool:
+            """判断「最近 _low_duration 秒」窗口内的平均速度是否低于阈值。"""
+            if _low_duration <= 0 or _low_threshold <= 0:
+                return False
+            if len(speed_samples) < 2:
+                return False
+            oldest_t, oldest_b = speed_samples[0]
+            newest_t, newest_b = speed_samples[-1]
+            window = newest_t - oldest_t
+            # 窗口需覆盖至少 90% 的目标时长才做判断，避免误判
+            if window < _low_duration * 0.9:
+                return False
+            speed = (newest_b - oldest_b) / window if window > 0 else 0.0
+            return speed < _low_threshold
 
         def _record():
             nonlocal recorded
@@ -507,29 +601,25 @@ async def proxy_v2(path: str, request: Request) -> Response:
             recorded = True
             if total_downloaded <= 0:
                 return
-
-            # 1) 统计流量
             try:
-                traffic_logger.log_traffic(
-                    bytes_downloaded=total_downloaded,
-                    node_id=_node_id,
-                )
+                traffic_logger.log_traffic(bytes_downloaded=total_downloaded, node_id=_node_id)
             except Exception as e:
                 logger.error(f"记录流量失败: {e}")
 
-            # 2) blob 请求 → 提升待定拉取 + 累加字节
-            #    多个 blob 请求会并发调用 ensure_pull_record，
-            #    第一次创建记录，后续复用同一个 pull_id
             if _is_blob_request and track_image:
                 try:
-                    pull_id = traffic_logger.ensure_pull_record(
-                        track_image,
-                        real_client_ip,
-                    )
+                    pull_id = traffic_logger.ensure_pull_record(track_image, real_client_ip)
                     if pull_id:
                         traffic_logger.add_bytes_to_pull(pull_id, total_downloaded)
                 except Exception as e:
                     logger.error(f"累加拉取字节失败: {e}")
+
+        # 【1】先发送预热缓冲数据
+        if warmup_buffer:
+            total_downloaded += len(warmup_buffer)
+            _update_speed_samples()
+            yield warmup_buffer
+            warmup_buffer = b""
 
         aiter = r.aiter_bytes(chunk_size=config.proxy.stream_chunk_size)
 
@@ -537,10 +627,7 @@ async def proxy_v2(path: str, request: Request) -> Response:
             while True:
                 try:
                     if first_chunk and _is_blob_request and _first_byte_to:
-                        chunk = await asyncio.wait_for(
-                            aiter.__anext__(),
-                            timeout=_first_byte_to,
-                        )
+                        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=_first_byte_to)
                     else:
                         chunk = await aiter.__anext__()
                 except StopAsyncIteration:
@@ -548,8 +635,7 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"首字节超时（{_path_type}，{_first_byte_to}s）："
-                        f"上游节点 {proxy_node.name if proxy_node else '?'} 无响应，"
-                        f"标记熔断并中断流"
+                        f"上游节点 {proxy_node.name if proxy_node else '?'} 无响应，标记熔断并中断流"
                     )
                     if _node_id is not None:
                         proxy_manager.mark_node_failed(
@@ -559,35 +645,52 @@ async def proxy_v2(path: str, request: Request) -> Response:
                         )
                         if _is_blob_request:
                             proxy_manager.mark_blob_failed(_node_id, path)
-                    raise
+                    _record()
+                    return
+
                 first_chunk = False
                 total_downloaded += len(chunk)
+                _update_speed_samples()
+
+                # ============================================================
+                # 【新增】中途低速监测
+                #   最近 _low_duration 秒内的平均速度低于阈值 → 中断流并熔断。
+                #   Docker 客户端会重试，由于该节点已熔断，重试会自动换节点。
+                # ============================================================
+                if _is_blob_request and _is_low_speed():
+                    speed_kb = _low_threshold / 1024.0
+                    logger.warning(
+                        f"节点 {proxy_node.name if proxy_node else '?'} 持续低速"
+                        f"（最近 {_low_duration:.0f}s 平均速度 < {speed_kb:.0f} KB/s），"
+                        f"已下载 {total_downloaded/1024/1024:.2f} MB，中断流并熔断"
+                    )
+                    if _node_id is not None:
+                        proxy_manager.mark_node_failed(
+                            _node_id,
+                            "low-speed",
+                            cooldown=config.proxy.fail_cooldown,
+                        )
+                        proxy_manager.mark_blob_failed(_node_id, path)
+                    _record()
+                    return
+
                 yield chunk
+
         except asyncio.CancelledError:
             _record()
             raise
-        except asyncio.TimeoutError:
-            # 已在上面标记失败，这里只做流量收尾
-            _record()
-            raise
         except httpx.ReadTimeout as e:
-            # v1.1.9: 区分「读取超时」与其他流式异常，给出更明确的日志
-            logger.warning(
-                f"流式读取超时（{_path_type}）：已下载 {total_downloaded} 字节，"
-                f"read_timeout={timeout.read}，上游 CDN 在两次分块之间停顿过久。"
-                f"如频繁出现，请将 proxy.blob_read_timeout 设为 null 或调大。"
-                f" 原始错误: {e}"
-            )
+            logger.warning(f"流式读取超时（{_path_type}）：已下载 {total_downloaded} 字节，" f"read_timeout={timeout.read}。原始错误: {e}")
             _record()
-            raise
+            return
         except httpx.RemoteProtocolError as e:
             logger.warning(f"上游提前断开连接（{_path_type}）：已下载 {total_downloaded} 字节: {e}")
             _record()
-            raise
+            return
         except Exception as e:
             logger.error(f"流式传输异常（{_path_type}）: {type(e).__name__}: {e}")
             _record()
-            raise
+            return
         finally:
             _record()
             try:

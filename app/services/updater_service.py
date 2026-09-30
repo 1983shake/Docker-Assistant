@@ -12,11 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from app.config import DATA_DIR, config
+from app.config import DATA_DIR, config, save_config
 from app.database import engine
 from app.models import ProxyNode
 from app.services import progress
-from app.services.docker_service import docker_service
+from app.services.docker_service import docker_service, PullCancelled
 from app.services.log_handler import log_handler
 from app.services.registry_client import get_remote_digests_multi, parse_image_reference
 
@@ -31,6 +31,9 @@ last_check_time: Optional[str] = None
 running_updates: Dict[str, str] = {}
 check_in_progress: bool = False
 container_checking: Dict[str, bool] = {}
+
+# 更新取消标志：{容器名: True}
+cancel_requested: Dict[str, bool] = {}
 
 
 # ============================================================
@@ -264,6 +267,13 @@ def _short_digest(d: Optional[str]) -> str:
 
 
 def _target_reference(current_image: str, entry: Dict[str, Any]) -> str:
+    """根据策略推导出目标镜像引用。
+
+    三种策略的语义（不再由 UI 直接暴露，仅由「更改 tag」按钮触发 pin）：
+      - track（默认） → 使用容器当前 tag（自动跟随，无论 tag 是 latest 还是 1.25.3）
+      - latest        → 强制改为 latest（保留兼容）
+      - pin           → 使用用户指定的 target_tag
+    """
     entry = entry or {}
     strategy = (entry.get("strategy") or "track").lower()
     registry, repo, current_tag = parse_image_reference(current_image)
@@ -283,6 +293,22 @@ def _target_reference(current_image: str, entry: Dict[str, Any]) -> str:
 
 
 # ============================================================
+#  取消控制
+# ============================================================
+def request_cancel(container_name: str) -> bool:
+    """请求取消指定容器的更新。返回 True 表示已受理。"""
+    if container_name not in running_updates:
+        return False
+    cancel_requested[container_name] = True
+    logger.info("[%s] 收到取消请求（当前阶段：%s）", container_name, running_updates.get(container_name))
+    return True
+
+
+def _is_cancelled(container_name: str) -> bool:
+    return bool(cancel_requested.get(container_name))
+
+
+# ============================================================
 #  单容器检测
 # ============================================================
 async def check_one(
@@ -293,6 +319,7 @@ async def check_one(
 ) -> Dict[str, Any]:
     name = container["name"]
     prefix = "[手动]" if manual else (f"[C{slot}]" if slot else "")
+    task_key = f"upd_check_one:{name}"
 
     current_image = container.get("image") or ""
     entry = (cfg.updater.containers or {}).get(name) or {}
@@ -323,10 +350,17 @@ async def check_one(
         logger.info("%s[%s] 自身容器，跳过检查", prefix, name)
         return result
 
+    # 手动检测时开启进度浮层
+    if manual:
+        progress.start(task_key, f"检测 {name}", total=100, message="查询本地镜像…")
+
     try:
         loop = asyncio.get_running_loop()
         local_digest = await loop.run_in_executor(None, docker_service.get_local_digest, target_ref)
         result["local_digest"] = local_digest
+
+        if manual:
+            progress.update(task_key, done=30, message="查询远程 digest…")
 
         # ---- 根据 registry 类型决定检测源 ----
         raw_mirrors, use_direct, reason = _resolve_check_source(target_ref)
@@ -344,6 +378,9 @@ async def check_one(
         )
         result["remote_digest"] = remote_digest
         result["source"] = source
+
+        if manual:
+            progress.update(task_key, done=80, message="比较 digest…")
 
         if remote_digest is None:
             result["error"] = "无法获取远程 digest（网络或 registry 不可达）"
@@ -376,6 +413,17 @@ async def check_one(
     except Exception as e:
         logger.exception("%s[%s] 检查异常", prefix, name)
         result["error"] = str(e)
+    finally:
+        # 无论成功 / 失败 / 异常都关闭进度浮层
+        if manual:
+            if result.get("error"):
+                progress.finish(task_key, "检测失败")
+            elif result.get("update_available"):
+                progress.finish(task_key, "发现新版本")
+            elif result.get("note"):
+                progress.finish(task_key, result["note"])
+            else:
+                progress.finish(task_key, "已是最新")
 
     return result
 
@@ -499,18 +547,22 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
     cfg = cfg or config
     entry = (cfg.updater.containers or {}).get(container_name) or {}
 
+    task_key = f"upd_pull:{container_name}"
+    # 清除可能残留的取消标志
+    cancel_requested.pop(container_name, None)
     running_updates[container_name] = "pulling"
-    progress.start(f"upd_pull:{container_name}", f"更新 {container_name}", message="拉取镜像…")
+    progress.start(task_key, f"更新 {container_name}", total=100, message="读取容器信息…")
     logger.info("[%s] 开始更新流程", container_name)
     try:
         loop = asyncio.get_running_loop()
 
-        def _work() -> Dict[str, Any]:
+        # ---- 步骤 1：读取容器信息，决定拉取源 ----
+        def _prepare():
             container = docker_service.client.containers.get(container_name)
             current_image = container.attrs["Config"]["Image"]
             target = _target_reference(current_image, entry)
 
-            # ---- 根据 registry 类型决定拉取源 ----
+            # 根据 registry 类型决定拉取源
             raw_mirrors, _use_direct, reason = _resolve_check_source(target)
             pull_use_mirror = bool(cfg.updater.pull_use_mirror)
 
@@ -520,38 +572,124 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
             else:
                 mirrors = []
 
-            running_updates[container_name] = "pulling"
-            logger.info(
-                "[%s] 拉取镜像 %s（策略：%s；加速源：%s）",
-                container_name,
-                target,
-                reason,
-                "启用" if pull_use_mirror and mirrors else "未使用",
-            )
-            image_ref, source = docker_service.pull_image(
+            return container, target, mirrors, reason, pull_use_mirror
+
+        container, target, mirrors, reason, pull_use_mirror = await loop.run_in_executor(None, _prepare)
+
+        # 取消检查点 1（准备阶段之后）
+        if _is_cancelled(container_name):
+            raise PullCancelled()
+
+        progress.update(task_key, done=15, message="拉取镜像…")
+        logger.info(
+            "[%s] 拉取镜像 %s（策略：%s；加速源：%s）",
+            container_name,
+            target,
+            reason,
+            "启用" if pull_use_mirror and mirrors else "未使用",
+        )
+
+        # ---- 步骤 2：拉取镜像（流式，可取消） ----
+        running_updates[container_name] = "pulling"
+
+        def _pull():
+            return docker_service.pull_image(
                 target,
                 mirrors,
                 bool(cfg.updater.use_direct),
+                should_cancel=lambda: _is_cancelled(container_name),
             )
 
-            running_updates[container_name] = "recreating"
-            progress.update(f"upd_pull:{container_name}", message="重建容器…")
-            logger.info("[%s] 重建容器（镜像 %s，来源 %s）", container_name, image_ref, source)
-            info = docker_service.recreate_container(container, image_ref)
-            info["source"] = source
-            info["target_image"] = target
-            return info
+        image_ref, source = await loop.run_in_executor(None, _pull)
 
-        result = await loop.run_in_executor(None, _work)
+        # 取消检查点 2（拉取完成之后、重建之前）
+        if _is_cancelled(container_name):
+            logger.info("[%s] 拉取完成，但已在重建前收到取消请求", container_name)
+            raise PullCancelled()
+
+        # ---- 步骤 3：重建容器 ----
+        running_updates[container_name] = "recreating"
+        progress.update(task_key, done=60, message="重建容器…")
+        logger.info("[%s] 重建容器（镜像 %s，来源 %s）", container_name, image_ref, source)
+
+        info = await loop.run_in_executor(
+            None,
+            lambda: docker_service.recreate_container(container, image_ref),
+        )
+        info["source"] = source
+        info["target_image"] = target
+
         logger.info("[%s] 更新完成", container_name)
-        progress.finish(f"upd_pull:{container_name}", "更新完成")
-        return result
+        progress.finish(task_key, "更新完成")
+
+        # ---- 更新成功后：自动清理已生效的 pin 策略 ----
+        # 若 pin 的 target_tag 与更新后容器实际使用的 tag 一致，
+        # 则该策略已"消费完毕"，自动清除恢复为 track（跟随当前 tag）。
+        # 这样「临时更改为 1.26 并更新完成」之后，UI 不再残留"指定 tag"的状态。
+        try:
+            _maybe_clear_pin_policy(container_name, target)
+        except Exception as e:
+            logger.warning("[%s] 自动清理 pin 策略失败: %s", container_name, e)
+
+        # ---- 更新成功后：立即执行一次版本检测 ----
+        # 目的：让 UI 立刻看到「已最新」，而不是等到下一个周期检测（默认 60 分钟）。
+        # 同步 await 而非后台 task：保证 API 返回时 check_results 已经刷新，
+        # 前端紧接着拉取 /api/updater/results 时拿到的是最新状态。
+        try:
+            await _refresh_one(container_name)
+            logger.info("[%s] 更新后版本检测完成", container_name)
+        except Exception as e:
+            # _refresh_one 内部已捕获异常，这里仅作双保险
+            logger.warning("[%s] 更新后版本检测失败: %s", container_name, e)
+
+        return info
+    except PullCancelled:
+        logger.info("[%s] 更新已取消", container_name)
+        progress.finish(task_key, "已取消")
+        return {
+            "ok": True,
+            "cancelled": True,
+            "name": container_name,
+            "target_image": entry.get("target_tag") or "",
+        }
     except Exception:
         logger.exception("[%s] 更新失败", container_name)
-        progress.finish(f"upd_pull:{container_name}", "更新失败")
+        progress.finish(task_key, "更新失败")
         raise
     finally:
         running_updates.pop(container_name, None)
+        cancel_requested.pop(container_name, None)
+
+
+def _maybe_clear_pin_policy(container_name: str, new_image_ref: str) -> None:
+    """
+    更新成功后调用：
+      如果该容器当前的 pin 策略 target_tag 与更新后容器的实际 tag 一致，
+      说明该 pin 已经"完成使命"（用户希望这次用该 tag 更新，现在容器就用这个 tag 了），
+      自动清除策略，恢复为默认的 track（跟随当前 tag）。
+    """
+    try:
+        entry = (config.updater.containers or {}).get(container_name) or {}
+        if (entry.get("strategy") or "track").lower() != "pin":
+            return
+        pin_tag = (entry.get("target_tag") or "").strip()
+        if not pin_tag:
+            return
+        _, _, new_tag = parse_image_reference(new_image_ref or "")
+        if pin_tag != new_tag:
+            return
+
+        containers = dict(config.updater.containers or {})
+        containers.pop(container_name, None)
+        config.updater.containers = containers
+        save_config()
+        logger.info(
+            "[%s] pin 策略已自动清理（target_tag=%s 与更新后的实际 tag 一致），恢复为跟随当前 tag",
+            container_name,
+            pin_tag,
+        )
+    except Exception as e:
+        logger.warning("[%s] 自动清理 pin 策略异常: %s", container_name, e)
 
 
 async def _refresh_one(name: str) -> None:

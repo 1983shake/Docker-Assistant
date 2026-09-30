@@ -73,6 +73,7 @@ async def api_containers():
         c["strategy"] = p.get("strategy") or "track"
         c["target_tag"] = p.get("target_tag") or ""
         c["updating"] = updater_service.running_updates.get(c["name"])
+        c["cancelling"] = bool(updater_service.cancel_requested.get(c["name"]))
         c["checking"] = bool(updater_service.container_checking.get(c["name"]))
         c["check"] = updater_service.check_results.get(c["name"])
     return containers
@@ -126,10 +127,22 @@ async def api_update(name: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    import asyncio
 
-    asyncio.create_task(updater_service._refresh_one(name))
+    # 说明：
+    #   更新后的「版本检测」已在 perform_update 内部同步 await 完成，
+    #   此处不再重复触发后台任务，避免与前端刷新产生竞态。
+    #   取消场景下 perform_update 会返回 cancelled=True，且不会写 check_results，
+    #   保持原有的检测结果不变。
     return {"ok": True, "result": result}
+
+
+@router.post("/api/updater/update/{name}/cancel")
+async def api_cancel_update(name: str):
+    """请求取消正在进行的容器更新。"""
+    accepted = updater_service.request_cancel(name)
+    if not accepted:
+        raise HTTPException(status_code=404, detail=f"{name} 当前没有正在进行的更新")
+    return {"ok": True, "name": name, "message": "取消请求已受理"}
 
 
 class ContainerPolicyPayload(BaseModel):
@@ -179,11 +192,24 @@ async def api_remove_image(
 
 @router.post("/api/updater/images/prune")
 async def api_prune_images():
+    """清理悬空镜像（<none>:<none>）。"""
     import asyncio
 
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, docker_service.prune_images)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/updater/images/prune-unused")
+async def api_prune_unused_images():
+    """清理未使用镜像（有 tag 但无任何容器引用）。"""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, docker_service.prune_unused_images)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

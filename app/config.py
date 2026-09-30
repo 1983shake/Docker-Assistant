@@ -19,10 +19,6 @@ CONFIG_PATH = CONFIG_DIR / "config.yaml"
 
 # ============================================================
 #  内置默认配置
-#
-#  首次启动时写入 CONFIG_DIR/config.yaml。
-#  用户后续通过 Web 后台或直接编辑该文件修改。
-#  删除 config.yaml 后重启，会重新生成本默认配置。
 # ============================================================
 DEFAULT_CONFIG_DICT: dict[str, Any] = {
     "app": {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__},
@@ -49,6 +45,10 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
         "recent_success_window": 120,
         "affinity_window": 120,
         "probe_node_window": 300,
+        # 【新增】低速切换
+        "low_speed_threshold": 524288,  # 低速阈值（字节/秒），默认 512 KB/s
+        "low_speed_duration": 10.0,  # 低速持续时间（秒）
+        "warmup_seconds": 2.0,  # 预热探测时长（秒），0 表示不预热
     },
     "access": {
         "ip_whitelist": [],
@@ -103,19 +103,13 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
         "timeout": 10.0,
         "upstreams": [],
     },
-    # ---------- 容器更新 ----------
     "updater": {
         "enabled": True,
         "check_interval_minutes": 60,
         "check_concurrency": 2,
         "auto_update": False,
-        # 检测镜像前是否等待镜像加速就绪
         "wait_for_proxy_ready": True,
-        # 等待镜像加速的最长时间（分钟）
         "proxy_ready_timeout_minutes": 15,
-        # 更新源列表：
-        #   "local"    → 内置镜像加速代理（http://127.0.0.1:<server.port>），默认
-        #   其他字符串  → 自定义加速源 URL
         "mirrors": ["local"],
         "use_direct": True,
         "pull_use_mirror": True,
@@ -124,11 +118,11 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
         "log_max_entries": 5000,
         "log_retention_days": 7,
         "log_display_level": "INFO",
+        "progress_popup_duration": 3,
         "containers": {},
     },
 }
 
-# 写入 config.yaml 时附加的头部说明（仅首次生成时写入，不影响解析）
 _CONFIG_FILE_HEADER = """\
 # ============================================================
 #  Docker-Assistant 配置文件  v1.0.0
@@ -218,6 +212,11 @@ class ProxyConfig(BaseModel):
     recent_success_window: int = 120
     affinity_window: int = 120
     probe_node_window: int = 300
+
+    # 【新增】低速切换
+    low_speed_threshold: int = 524288  # 字节/秒，默认 512 KB/s
+    low_speed_duration: float = 10.0  # 秒
+    warmup_seconds: float = 2.0  # 秒，0 表示不预热
 
 
 class AccessConfig(BaseModel):
@@ -326,20 +325,12 @@ class SearchConfig(BaseModel):
 
 
 class UpdaterConfig(BaseModel):
-    """容器更新配置（融合于加速节点配置体系内）。"""
-
     enabled: bool = True
     check_interval_minutes: int = 60
     check_concurrency: int = 2
     auto_update: bool = False
-
-    # 检测镜像前是否等待镜像加速就绪
     wait_for_proxy_ready: bool = True
     proxy_ready_timeout_minutes: int = 15
-
-    # 更新源列表：
-    #   "local"    → 内置镜像加速代理（http://127.0.0.1:<server.port>）
-    #   其他字符串  → 自定义加速源 URL
     mirrors: list[str] = ["local"]
     use_direct: bool = True
     pull_use_mirror: bool = True
@@ -348,6 +339,7 @@ class UpdaterConfig(BaseModel):
     log_max_entries: int = 5000
     log_retention_days: int = 7
     log_display_level: str = "INFO"
+    progress_popup_duration: int = 3
     containers: dict[str, dict[str, str]] = {}
 
     @field_validator("mirrors", mode="before")
@@ -394,32 +386,14 @@ class AppConfig(BaseModel):
 #  自动创建 / 加载 / 保存
 # ============================================================
 def ensure_config_exists() -> bool:
-    """
-    确保 CONFIG_DIR/config.yaml 存在。
-
-    首次启动（或 config.yaml 被删除）时，直接使用内置的
-    DEFAULT_CONFIG_DICT 写入完整默认配置，不再依赖外部示例文件。
-
-    返回 True 表示本次新建。
-    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
     if CONFIG_PATH.exists():
         return False
-
     logger.info(f"未发现 {CONFIG_PATH}，正在使用内置默认配置创建...")
-
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            # 先写说明头，再写 YAML 内容
             f.write(_CONFIG_FILE_HEADER)
-            yaml.dump(
-                DEFAULT_CONFIG_DICT,
-                f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
+            yaml.dump(DEFAULT_CONFIG_DICT, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
         logger.info(f"已生成默认配置到 {CONFIG_PATH}")
         return True
     except Exception as e:
@@ -430,10 +404,7 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     ensure_config_exists()
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-
-    # 应用名称/标语/版本固定
     data["app"] = {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__}
-
     for key in ("custom_nodes", "manually_disabled"):
         if data.get(key) is None:
             data[key] = []
@@ -445,7 +416,6 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
         data["speed_test"] = {}
     if data.get("updater") is None:
         data["updater"] = {}
-
     return AppConfig(**data)
 
 
@@ -461,10 +431,8 @@ def reload_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 
 def save_config(path: Path = CONFIG_PATH) -> None:
-    """把内存中的 config 落盘（保持 app 段固定值）。"""
     data = config.model_dump(mode="json", by_alias=True)
     data["app"] = {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__}
-
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".yaml.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -473,5 +441,4 @@ def save_config(path: Path = CONFIG_PATH) -> None:
     tmp.replace(path)
 
 
-# 全局配置对象
 config = load_config()
