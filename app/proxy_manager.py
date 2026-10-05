@@ -1,19 +1,20 @@
+"""代理节点管理：拉取、检测、测速、候选排序、熔断、粘性。"""
+
 import asyncio
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 from sqlmodel import Session, select
 
-from app.database import engine
-from app.models import ProxyNode, HealthCheckLog, get_shanghai_time
 from app.config import config
-from app.services import progress
+from app.core import progress
+from app.db import engine, ProxyNode, HealthCheckLog, get_shanghai_time
 
-logger = logging.getLogger("dockermirrorflow.proxy_manager")
+logger = logging.getLogger("dockerassistant.proxy_manager")
 
 # ============================================================
 #  registry 类型映射
@@ -58,21 +59,16 @@ _last_success_at: dict[int, float] = {}
 _image_affinity: dict[str, tuple[int, float]] = {}
 _probe_affinity: Optional[tuple[int, float]] = None
 
-# 缓存上限（优化待机内存占用）
 _MAX_BLOB_CACHE = 2000
 _MAX_AFFINITY_CACHE = 1000
 
-# 速度测试 token 缓存
 _speed_token_cache: dict[str, tuple[str, float]] = {}
 _SPEED_TOKEN_TTL = 240
 _MAX_SPEED_TOKEN_CACHE = 200
 
 
 # ============================================================
-#  任务进度跟踪（转发到共享的 progress 模块）
-#
-#  为了让"容器检测"的进度能与"节点检测"在同一浮层显示，
-#  进度状态统一交由 app.services.progress 管理。
+#  任务进度跟踪（转发到 core.progress）
 # ============================================================
 
 
@@ -564,10 +560,7 @@ async def _get_speed_test_token(
     username: str = None,
     password: str = None,
 ) -> Optional[str]:
-    """
-    从 401 响应中解析 WWW-Authenticate 并获取 token。
-    带内存缓存，减少认证请求。
-    """
+    """从 401 响应中解析 WWW-Authenticate 并获取 token（带内存缓存）。"""
     header = resp.headers.get("www-authenticate", "")
     info = _parse_www_authenticate(header)
     if not info.get("realm"):
@@ -615,10 +608,7 @@ async def _fetch_with_auth(
     headers: dict,
     node: ProxyNode,
 ) -> Optional[httpx.Response]:
-    """
-    GET 请求；遇到 401 时自动获取 token 并重试。
-    返回 Response 或 None（网络错误）。
-    """
+    """GET 请求；遇到 401 时自动获取 token 并重试。返回 Response 或 None。"""
     try:
         r = await client.get(url, headers=headers)
     except Exception as e:
@@ -642,11 +632,7 @@ async def _fetch_with_auth(
 
 
 def _pick_layer_for_speed_test(layers: list[dict]) -> Optional[dict]:
-    """
-    选择适合速度测试的 layer：
-      - 优先选大小在 20MB ~ 100MB 之间的
-      - 若没有，则选最接近 50MB 的
-    """
+    """优先选 20MB~100MB 的 layer；否则选最接近 50MB 的。"""
     if not layers:
         return None
 
@@ -703,9 +689,7 @@ async def _download_blob_with_auth(
 
 
 async def test_node_speed(node: ProxyNode) -> float:
-    """
-    固定时长内下载 layer，计算 bytes/sec。
-    """
+    """固定时长内下载 layer，计算 bytes/sec。"""
     if not config.speed_test.enabled:
         return 0.0
 
@@ -852,20 +836,19 @@ async def run_speed_test(ids: list[int] = None):
 
 
 # ============================================================
-#  候选节点选择（v1.2.0 优化排序）
+#  候选节点选择
 # ============================================================
 
 
 def _candidate_sort_key(p: ProxyNode):
     """
-    v1.2.0：候选排序 key（元组越小越靠前）
+    候选排序 key（元组越小越靠前）
 
     排序优先级：
       1. 测速过的节点（speed > 0）永远优于测速未完成的节点
-         —— 冷启动时如果 speed 全为 0，则全部落入第二档
-      2. 速度降序（speed 越大越靠前，用 -speed）
-      3. 最近成功过的节点优先（prefer_recent_success 开启时）
-      4. 延迟升序（latency 越小越靠前）
+      2. 速度降序
+      3. 最近成功过的节点优先
+      4. 延迟升序
     """
     speed = p.speed or 0
     latency = p.latency if (p.latency is not None and p.latency < 9999) else 9999
@@ -878,17 +861,12 @@ def _candidate_sort_key(p: ProxyNode):
             recent = 1
 
     if speed > 0:
-        # 第 1 档：已测速
         return (0, -speed, -recent, latency)
-    # 第 2 档：未测速（保持"最近成功"优先，再按延迟）
     return (1, 0, -recent, latency)
 
 
 def get_candidate_proxies(path: str = "") -> list[tuple[ProxyNode, str]]:
-    """
-    返回所有可用候选节点，按速度降序排列。
-    拉取失败时依次尝试，全部失败则停止。
-    """
+    """返回所有可用候选节点，按速度降序排列。"""
     path = path.lstrip("/")
 
     with Session(engine) as session:
@@ -900,7 +878,6 @@ def get_candidate_proxies(path: str = "") -> list[tuple[ProxyNode, str]]:
         ).all()
         proxies = list(proxies)
 
-    # v1.2.0：使用 _candidate_sort_key 取代原来的 (-speed, latency)
     proxies.sort(key=_candidate_sort_key)
 
     has_prefix = _path_has_registry_prefix(path)
@@ -928,7 +905,7 @@ def get_candidate_proxies(path: str = "") -> list[tuple[ProxyNode, str]]:
         candidates.append(
             (
                 ProxyNode(
-                    name="DockerMirrorFlow Fallback",
+                    name="Docker-Assistant Fallback",
                     url="https://registry-1.docker.io",
                 ),
                 path,
@@ -1068,21 +1045,12 @@ def set_manual_disable(proxy_id: int, disabled: bool, reason: str = "") -> Optio
 
 
 # ============================================================
-#  启动时检测判断（按上次检测 / 测速时间）
-#
-#  逻辑：
-#    - 首次启动（找不到任何 last_check / 未测过） → 立即执行
-#    - 能找到时间戳，且距今 < 配置周期 → 跳过
-#    - 能找到时间戳，且距今 >= 配置周期 → 执行
+#  启动时检测判断
 # ============================================================
-
-from datetime import datetime, timedelta, timezone
 
 
 def _ensure_aware(dt: datetime) -> datetime:
-    """
-    SQLite 读回的 datetime 可能丢失 tzinfo，统一补成上海时区（UTC+8）。
-    """
+    """SQLite 读回的 datetime 可能丢失 tzinfo，统一补成上海时区（UTC+8）。"""
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -1091,21 +1059,11 @@ def _ensure_aware(dt: datetime) -> datetime:
 
 
 def should_run_health_check() -> bool:
-    """
-    是否需要立即执行在线检测。
-
-    返回 True 的情况：
-      - 所有节点都没有 last_check（首次启动）
-      - 最近一次 last_check 距今 >= health_check.interval_minutes
-
-    返回 False 的情况：
-      - 数据库无节点
-      - 最近一次 last_check 距今 < health_check.interval_minutes
-    """
+    """是否需要立即执行在线检测。"""
     interval_minutes = max(1, int(config.health_check.interval_minutes or 60))
 
     with Session(engine) as session:
-        nodes = session.exec(select(ProxyNode).where(ProxyNode.manually_disabled == False)).all()  # noqa: E712
+        nodes = session.exec(select(ProxyNode).where(ProxyNode.manually_disabled == False)).all()
 
     if not nodes:
         return False
@@ -1127,21 +1085,11 @@ def should_run_health_check() -> bool:
 
 
 def should_run_speed_test() -> bool:
-    """
-    是否需要立即执行速度测试。
-
-    返回 True 的情况：
-      - 所有节点的 speed 均为 0（未测过）
-      - 已测过节点的最近 updated_at 距今 >= speed_test.interval_minutes
-
-    返回 False 的情况：
-      - 数据库无节点
-      - 已测过节点的最近 updated_at 距今 < speed_test.interval_minutes
-    """
+    """是否需要立即执行速度测试。"""
     interval_minutes = max(1, int(config.speed_test.interval_minutes or 720))
 
     with Session(engine) as session:
-        nodes = session.exec(select(ProxyNode).where(ProxyNode.manually_disabled == False)).all()  # noqa: E712
+        nodes = session.exec(select(ProxyNode).where(ProxyNode.manually_disabled == False)).all()
 
     if not nodes:
         return False

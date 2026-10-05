@@ -1,21 +1,26 @@
-"""镜像加速 + 主页 Web UI（已融合容器更新器）。"""
+"""Web 路由：管理页面 + 节点 API + 配置 API + 容器更新 API。"""
 
+import asyncio
 import secrets
 import shutil
 from datetime import datetime
 
 import yaml
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app import APP_NAME, APP_TAGLINE, __version__
-from app.config import CONFIG_PATH, AppConfig, config, reload_config
-from app.database import engine
-from app.models import HealthCheckLog, ProxyNode
-from app.services import proxy_manager, search_service, traffic_logger
+from app import APP_INFO, get_app_config_dict, get_changelog
+from app.config import CONFIG_PATH, AppConfig, config, reload_config, save_config
+from app.core import log_handler
+from app.db import HealthCheckLog, ProxyNode, engine
+from app.docker_service import docker_service
+from app import proxy_manager, updater_service
+from app.registry import search_docker_hub
+from app import traffic as traffic_logger
 
 security = HTTPBasic(auto_error=False)
 
@@ -43,7 +48,9 @@ router = APIRouter(dependencies=[Depends(verify_auth)])
 templates = Jinja2Templates(directory="app/templates")
 
 
-# ==================== 页面 ====================
+# ============================================================
+#  页面
+# ============================================================
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -54,25 +61,26 @@ async def index(request: Request):
     pull_history = traffic_logger.get_pull_history(limit=200)
     total_download = sum(s.download_bytes for s in stats)
 
-    # 【新增】状态浮窗展示时长（秒）：供首屏注入到前端
+    # 状态浮窗展示时长（秒）：供首屏注入到前端
     popup_duration = getattr(config.updater, "progress_popup_duration", 3) or 3
 
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "app_name": config.app.name,
-            "app_tagline": config.app.tagline,
-            "app_version": __version__,
+            # 统一从 APP_INFO 取值
+            "app_name": APP_INFO["name"],
+            "app_tagline": APP_INFO["tagline"],
+            "app_version": APP_INFO["version"],
+            "start_year": APP_INFO["start_year"],  # 【新增】供 footer 使用
+            "repo": APP_INFO["repo"],  # 【新增】供 footer 链接使用
             "current_year": datetime.now().year,
             "proxies": [p.model_dump(mode="json") for p in proxies],
             "stats": [s.model_dump(mode="json") for s in stats],
             "total_download": total_download,
             "pull_stats": pull_stats,
             "pull_history": [p.model_dump(mode="json") for p in pull_history],
-            # 状态浮窗展示时长
             "popup_duration": popup_duration,
-            # 容器更新器初始状态（供融合页面首屏渲染）
             "updater_enabled": config.updater.enabled,
             "updater_settings": {
                 "enabled": config.updater.enabled,
@@ -92,13 +100,19 @@ async def index(request: Request):
     )
 
 
-# ==================== 节点 API ====================
+@router.get("/updater")
+async def updater_page():
+    return RedirectResponse(url="/?view=containers", status_code=307)
+
+
+# ============================================================
+#  节点 API
+# ============================================================
 
 
 @router.get("/api/proxies")
 async def list_proxies():
-    proxies = proxy_manager.get_all_proxies()
-    return [p.model_dump(mode="json") for p in proxies]
+    return [p.model_dump(mode="json") for p in proxy_manager.get_all_proxies()]
 
 
 @router.post("/api/proxies")
@@ -178,7 +192,9 @@ async def test_single_proxy(proxy_id: int):
     return node.model_dump(mode="json") if node else {}
 
 
-# ==================== 批量操作 ====================
+# ============================================================
+#  批量操作
+# ============================================================
 
 
 @router.post("/api/proxies/fetch")
@@ -235,7 +251,9 @@ async def batch_enable(request: Request):
     return {"status": "ok", "count": len(ids)}
 
 
-# ==================== 导入导出 ====================
+# ============================================================
+#  导入导出
+# ============================================================
 
 
 @router.get("/api/proxies/export")
@@ -272,7 +290,9 @@ async def import_proxies(request: Request):
         raise HTTPException(400, f"导入失败: {e}")
 
 
-# ==================== 拉取记录 ====================
+# ============================================================
+#  拉取记录
+# ============================================================
 
 
 @router.get("/api/pulls")
@@ -287,7 +307,9 @@ async def clear_pulls():
     return {"status": "ok"}
 
 
-# ==================== 在线检测日志 ====================
+# ============================================================
+#  在线检测日志
+# ============================================================
 
 
 @router.get("/api/health-logs/{node_id}")
@@ -299,7 +321,9 @@ async def get_health_logs(node_id: int, limit: int = 50):
     return [log.model_dump(mode="json") for log in logs]
 
 
-# ==================== 任务进度 ====================
+# ============================================================
+#  任务进度
+# ============================================================
 
 
 @router.get("/api/tasks/status")
@@ -307,14 +331,16 @@ async def tasks_status():
     return proxy_manager.get_progress()
 
 
-# ==================== 镜像搜索 ====================
+# ============================================================
+#  镜像搜索
+# ============================================================
 
 
 @router.get("/api/search")
 async def search_images(q: str, page_size: int = None):
     if page_size is None:
         page_size = config.search.page_size
-    result = await search_service.search_docker_hub(q, page_size)
+    result = await search_docker_hub(q, page_size)
     return JSONResponse(content=result)
 
 
@@ -338,7 +364,7 @@ async def get_config():
     except Exception as e:
         raise HTTPException(500, f"解析配置失败: {e}")
 
-    data["app"] = {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__}
+    data["app"] = get_app_config_dict()
 
     return {
         "yaml": text,
@@ -380,7 +406,7 @@ async def update_config(request: Request):
     if not isinstance(parsed, dict):
         raise HTTPException(400, "配置根节点必须是字典（mapping）")
 
-    parsed["app"] = {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__}
+    parsed["app"] = get_app_config_dict()
 
     try:
         AppConfig(**parsed)
@@ -450,3 +476,272 @@ async def download_backup():
     except Exception as e:
         raise HTTPException(500, f"读取备份失败: {e}")
     return JSONResponse(content={"yaml": text, "path": str(backup_path)})
+
+
+# ============================================================
+#  容器更新 API（原 updater.py）
+# ============================================================
+
+
+@router.get("/api/updater/meta")
+async def api_meta():
+    """返回应用元信息（含起始年份、仓库、许可证）。"""
+    return {**APP_INFO, "current_year": datetime.now().year}
+
+
+@router.get("/api/updater/changelog")
+async def api_changelog(limit: int = 0):
+    """返回版本变更历史。
+
+    - limit <= 0：返回全部
+    - limit > 0：只返回最近 limit 个版本
+    """
+    return {"changelog": get_changelog(limit)}
+
+
+@router.get("/api/updater/health")
+async def api_health():
+    ok = docker_service.ping()
+    return {"docker": ok, "time": datetime.now().isoformat(timespec="seconds")}
+
+
+@router.get("/api/system/health")
+async def api_system_health():
+    return {"status": "ok"}
+
+
+@router.get("/api/updater/logs")
+async def api_logs(after: int = 0, limit: int = 500, min_level: str = "INFO"):
+    limit = max(1, min(int(limit), 1000))
+    return log_handler.snapshot(after=max(0, int(after)), limit=limit, min_level=min_level)
+
+
+@router.delete("/api/updater/logs")
+async def api_clear_logs():
+    log_handler.clear()
+    return {"ok": True}
+
+
+@router.get("/api/updater/containers")
+async def api_containers():
+    loop = asyncio.get_running_loop()
+    containers = await loop.run_in_executor(None, docker_service.list_containers)
+
+    policies = config.updater.containers or {}
+    for c in containers:
+        p = policies.get(c["name"]) or {}
+        c["strategy"] = p.get("strategy") or "track"
+        c["target_tag"] = p.get("target_tag") or ""
+        c["updating"] = updater_service.running_updates.get(c["name"])
+        c["cancelling"] = bool(updater_service.cancel_requested.get(c["name"]))
+        c["checking"] = bool(updater_service.container_checking.get(c["name"]))
+        c["check"] = updater_service.check_results.get(c["name"])
+    return containers
+
+
+@router.post("/api/updater/containers/{name}/check")
+async def api_check_one(name: str):
+    if updater_service.container_checking.get(name):
+        raise HTTPException(status_code=409, detail=f"{name} 正在检测中")
+
+    loop = asyncio.get_running_loop()
+    containers = await loop.run_in_executor(None, docker_service.list_containers)
+    target = next((c for c in containers if c["name"] == name), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"未找到容器 {name}")
+    if target.get("is_self"):
+        raise HTTPException(status_code=400, detail="自身容器，无需检测")
+
+    updater_service.container_checking[name] = True
+    try:
+        result = await updater_service.check_one(target, config, slot=None, manual=True)
+        updater_service.check_results[name] = result
+        updater_service._save_state()
+    finally:
+        updater_service.container_checking.pop(name, None)
+    return {"ok": True, "result": result}
+
+
+@router.post("/api/updater/check")
+async def api_check_all():
+    results = await updater_service.run_check_all()
+    return {"last_check": updater_service.last_check_time, "results": results}
+
+
+@router.get("/api/updater/results")
+async def api_results():
+    return {
+        "last_check": updater_service.last_check_time,
+        "results": list(updater_service.check_results.values()),
+        "checking": updater_service.check_in_progress,
+    }
+
+
+@router.post("/api/updater/update/{name}")
+async def api_update(name: str):
+    try:
+        result = await updater_service.perform_update(name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "result": result}
+
+
+@router.post("/api/updater/update/{name}/cancel")
+async def api_cancel_update(name: str):
+    """请求取消正在进行的容器更新。"""
+    accepted = updater_service.request_cancel(name)
+    if not accepted:
+        raise HTTPException(status_code=404, detail=f"{name} 当前没有正在进行的更新")
+    return {"ok": True, "name": name, "message": "取消请求已受理"}
+
+
+class ContainerPolicyPayload(BaseModel):
+    strategy: str = Field("track", pattern="^(track|latest|pin)$")
+    target_tag: str = ""
+
+
+@router.put("/api/updater/containers/{name}/policy")
+async def api_put_policy(name: str, payload: ContainerPolicyPayload):
+    containers = config.updater.containers or {}
+    containers[name] = {
+        "strategy": payload.strategy,
+        "target_tag": payload.target_tag.strip(),
+    }
+    config.updater.containers = containers
+    save_config()
+    return {"ok": True, "policy": containers[name]}
+
+
+# ============================================================
+#  镜像管理
+# ============================================================
+
+
+@router.get("/api/updater/images")
+async def api_images():
+    """列出本地镜像（剥离代理前缀标签后再返回）。"""
+    loop = asyncio.get_running_loop()
+    prefixes = updater_service.get_local_mirror_prefixes()
+    return await loop.run_in_executor(
+        None,
+        lambda: docker_service.list_images(mirror_prefixes=prefixes),
+    )
+
+
+@router.delete("/api/updater/images")
+async def api_remove_image(
+    image: str = Query(..., description="镜像 ID 或 name:tag"),
+    force: bool = Query(False),
+    noprune: bool = Query(False),
+):
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, lambda: docker_service.remove_image(image, force=force, noprune=noprune))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/updater/images/prune")
+async def api_prune_images():
+    """清理悬空镜像（<none>:<none>）。"""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, docker_service.prune_images)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/updater/images/prune-unused")
+async def api_prune_unused_images():
+    """清理未使用镜像（有 tag 但无任何容器引用）。"""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, docker_service.prune_unused_images)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/updater/images/cleanup-mirror-tags")
+async def api_cleanup_mirror_tags():
+    """清理所有镜像上形如 "127.0.0.1:8000/xxx" 的代理前缀标签。"""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, updater_service.cleanup_mirror_tags)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+#  设置
+# ============================================================
+
+
+class UpdaterSettingsPayload(BaseModel):
+    enabled: bool = True
+    check_interval_minutes: int = Field(60, ge=5, le=10080)
+    check_concurrency: int = Field(2, ge=1, le=20)
+    auto_update: bool = False
+    wait_for_proxy_ready: bool = True
+    proxy_ready_timeout_minutes: int = Field(15, ge=1, le=180)
+    mirrors: list[str] = []
+    use_direct: bool = True
+    pull_use_mirror: bool = True
+    registry_username: str = ""
+    registry_password: str = ""
+    log_max_entries: int = Field(5000, ge=100, le=100000)
+    log_retention_days: int = Field(7, ge=1, le=365)
+
+
+@router.get("/api/updater/settings")
+async def api_get_settings():
+    u = config.updater
+    return {
+        "enabled": u.enabled,
+        "check_interval_minutes": u.check_interval_minutes,
+        "check_concurrency": u.check_concurrency,
+        "auto_update": u.auto_update,
+        "wait_for_proxy_ready": u.wait_for_proxy_ready,
+        "proxy_ready_timeout_minutes": u.proxy_ready_timeout_minutes,
+        "mirrors": u.mirrors,
+        "use_direct": u.use_direct,
+        "pull_use_mirror": u.pull_use_mirror,
+        "registry_username": u.registry_username,
+        "registry_password": u.registry_password,
+        "log_max_entries": u.log_max_entries,
+        "log_retention_days": u.log_retention_days,
+        "log_display_level": u.log_display_level,
+    }
+
+
+@router.put("/api/updater/settings")
+async def api_put_settings(payload: UpdaterSettingsPayload):
+    u = config.updater
+    u.enabled = payload.enabled
+    u.check_interval_minutes = payload.check_interval_minutes
+    u.check_concurrency = payload.check_concurrency
+    u.auto_update = payload.auto_update
+    u.wait_for_proxy_ready = payload.wait_for_proxy_ready
+    u.proxy_ready_timeout_minutes = payload.proxy_ready_timeout_minutes
+    u.mirrors = [m.strip() for m in payload.mirrors if m.strip()]
+    u.use_direct = payload.use_direct
+    u.pull_use_mirror = payload.pull_use_mirror
+    u.registry_username = payload.registry_username.strip()
+    u.registry_password = payload.registry_password
+    u.log_max_entries = payload.log_max_entries
+    u.log_retention_days = payload.log_retention_days
+    save_config()
+
+    try:
+        log_handler.cleanup_file(
+            retention_days=payload.log_retention_days,
+            max_entries=payload.log_max_entries,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True}

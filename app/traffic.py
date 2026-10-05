@@ -1,16 +1,18 @@
+"""流量统计 + 拉取历史 + 待定拉取管理。"""
+
 import logging
 from datetime import datetime, timedelta
 from sqlmodel import Session, select, func
 
-from app.database import engine
-from app.models import (
+from app.db import (
+    engine,
     TrafficStats,
     PullHistory,
     ProxyNode,
     get_shanghai_time,
 )
 
-logger = logging.getLogger("dockermirrorflow.traffic")
+logger = logging.getLogger("dockerassistant.traffic")
 
 # 内存缓存
 _recent_pulls: dict[str, datetime] = {}
@@ -100,9 +102,7 @@ def mark_pending_pull(
     node_id: int = None,
     node_name: str = None,
 ):
-    """
-    manifest 请求成功时调用。写入内存待定区，等 blob 流量确认拉取。
-    """
+    """manifest 请求成功时调用。写入内存待定区，等 blob 流量确认拉取。"""
     if not image or not client_ip:
         return
     norm = _normalize_image(image)
@@ -143,12 +143,10 @@ def ensure_pull_record(image: str, client_ip: str) -> int | None:
         logger.debug(f"[pull-pending] 未命中待定条目: {key}")
         return None
 
-    # 已提升 → 复用
     if pending.get("pull_id"):
         pending["ts"] = datetime.now()
         return pending["pull_id"]
 
-    # 首次提升 → 创建记录
     with Session(engine) as session:
         pull = PullHistory(
             image=pending["image"],

@@ -1,8 +1,27 @@
+"""数据库引擎 + ORM 模型。"""
+
+from __future__ import annotations
+
+import enum
+import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlmodel import Field, SQLModel
-import enum
+from sqlalchemy import inspect, text
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Field, SQLModel, create_engine
+
+from app.config import DATA_DIR
+
+logger = logging.getLogger("dockerassistant.db")
+
+os.makedirs(str(DATA_DIR), exist_ok=True)
+engine = create_engine(
+    f"sqlite:///{DATA_DIR}/docker-assistant.db",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 
 
 def get_shanghai_time() -> datetime:
@@ -78,3 +97,54 @@ class HealthCheckLog(SQLModel, table=True):
     success: bool
     latency: float
     error_message: Optional[str] = None
+
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+
+def upgrade_db():
+    """检查缺失的列并添加（自动迁移）。"""
+    try:
+        inspector = inspect(engine)
+
+        if inspector.has_table("proxynode"):
+            columns = [c["name"] for c in inspector.get_columns("proxynode")]
+            new_columns = {
+                "registry_type": "VARCHAR DEFAULT 'dockerhub'",
+                "route_prefix": "VARCHAR",
+                "failure_reason": "VARCHAR",
+                "download_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "is_custom": "BOOLEAN DEFAULT 0",
+                "manually_disabled": "BOOLEAN DEFAULT 0",
+                "manual_disable_reason": "VARCHAR",
+                "manual_disable_at": "DATETIME",
+                "created_at": "DATETIME",
+                "updated_at": "DATETIME",
+                "speed": "REAL DEFAULT 0",
+            }
+            with engine.connect() as conn:
+                for col, col_type in new_columns.items():
+                    if col not in columns:
+                        logger.info(f"迁移: 添加 {col} 列到 proxynode")
+                        conn.execute(text(f"ALTER TABLE proxynode ADD COLUMN {col} {col_type}"))
+                conn.commit()
+
+        if inspector.has_table("pullhistory"):
+            columns = [c["name"] for c in inspector.get_columns("pullhistory")]
+            new_columns = {
+                "status": "VARCHAR DEFAULT 'success'",
+                "error_message": "VARCHAR",
+                "download_bytes": "INTEGER NOT NULL DEFAULT 0",
+            }
+            with engine.connect() as conn:
+                for col, col_type in new_columns.items():
+                    if col not in columns:
+                        logger.info(f"迁移: 添加 {col} 列到 pullhistory")
+                        conn.execute(text(f"ALTER TABLE pullhistory ADD COLUMN {col} {col_type}"))
+                conn.commit()
+
+        if not inspector.has_table("healthchecklog"):
+            SQLModel.metadata.create_all(engine)
+    except Exception as e:
+        logger.error(f"迁移失败: {e}")

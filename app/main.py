@@ -10,13 +10,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from sqlmodel import Session, select
 
-from app import APP_NAME, APP_TAGLINE, __version__
+from app import APP_INFO
 from app.config import config
-from app.database import create_db_and_tables, engine, upgrade_db
-from app.models import ProxyNode
-from app.routers import docker_proxy, updater, web_ui
-from app.services import proxy_manager, updater_service
-from app.services.log_handler import log_handler
+from app.core import log_handler
+from app.db import create_db_and_tables, engine, upgrade_db, ProxyNode
+from app.routers import proxy as proxy_router
+from app.routers import web as web_router
+from app import proxy_manager, updater_service
 
 # ========== 日志配置 ==========
 handlers = [logging.StreamHandler()]
@@ -148,7 +148,12 @@ async def lifespan(app: FastAPI):
     global _bg_task
 
     logger.info("=" * 60)
-    logger.info(f"  {APP_NAME}  {APP_TAGLINE}  v{__version__}")
+    logger.info(
+        "  %s  %s  v%s",
+        APP_INFO["name"],
+        APP_INFO["tagline"],
+        APP_INFO["version"],
+    )
     logger.info("=" * 60)
 
     # 1. 初始化数据库
@@ -239,15 +244,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title=APP_NAME,
-    description=f"{APP_TAGLINE} —— 镜像代理加速 + 容器镜像更新一体化平台",
-    version=__version__,
+    title=APP_INFO["name"],
+    description=f"{APP_INFO['tagline']} —— 镜像代理加速 + 容器镜像更新一体化平台",
+    version=APP_INFO["version"],
     lifespan=lifespan,
 )
 
-app.include_router(web_ui.router)
-app.include_router(docker_proxy.router)
-app.include_router(updater.router)
+app.include_router(web_router.router)
+app.include_router(proxy_router.router)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,10 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from app.config import DATA_DIR, config, save_config
-from app.database import engine
-from app.models import ProxyNode
-from app.services import progress
-from app.services.docker_service import docker_service, PullCancelled
-from app.services.log_handler import log_handler
-from app.services.registry_client import get_remote_digests_multi, parse_image_reference
+from app.core import progress, log_handler
+from app.db import engine, ProxyNode
+from app.docker_service import docker_service, PullCancelled
+from app.registry import get_remote_digests_multi, parse_image_reference
 
 logger = logging.getLogger("dockerassistant.updater")
 
@@ -150,19 +148,13 @@ def _expand_mirrors_for_pull(mirrors: List[str]) -> List[str]:
 #  代理前缀标签：收集 + 清理
 # ============================================================
 def get_local_mirror_prefixes() -> List[str]:
-    """返回所有可能作为本代理前缀的 host:port 列表。
-
-    用于：
-      1) list_images 显示层剥离（避免暴露内部地址）
-      2) cleanup_mirror_tags 一次性清理历史遗留 tag
-    """
+    """返回所有可能作为本代理前缀的 host:port 列表。"""
     prefixes: List[str] = []
 
     local = _resolve_local_mirror_for_daemon()
     if local:
         prefixes.append(local)
 
-    # 常见默认端口，防止历史遗留用非当前端口
     port = int(config.server.port or 8000)
     for h in ("127.0.0.1", "localhost"):
         p = f"{h}:{port}"
@@ -175,7 +167,6 @@ def get_local_mirror_prefixes() -> List[str]:
         if p and p not in prefixes:
             prefixes.append(p)
 
-    # 去重（忽略大小写），保持顺序
     seen: set = set()
     out: List[str] = []
     for p in prefixes:
@@ -279,7 +270,7 @@ def _load_state() -> None:
             for k, v in res.items():
                 if isinstance(v, dict):
                     check_results[k] = v
-        logger.info(f"[startup] 已恢复容器检测状态（last_check={last_check_time}，{len(check_results)} 条记录）")
+        logger.info(f"[startup] 已恢复容器检测状态（last_check={last_check_time}，" f"{len(check_results)} 条记录）")
     except Exception as e:
         logger.warning(f"[startup] 读取容器检测状态失败: {e}")
 

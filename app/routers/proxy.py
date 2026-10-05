@@ -1,3 +1,5 @@
+"""Docker Registry v2 代理：流式转发 + 加速源选择 + 认证透传。"""
+
 import asyncio
 import base64
 import logging
@@ -10,19 +12,18 @@ import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
+from app import proxy_manager
+from app import traffic as traffic_logger
 from app.config import config
-from app.models import ProxyNode
-from app.services import proxy_manager, traffic_logger
+from app.db import ProxyNode
 
 router = APIRouter()
-logger = logging.getLogger("dockermirrorflow.proxy")
+logger = logging.getLogger("dockerassistant.proxy")
 
 DOCKER_AUTH_URL = "https://auth.docker.io/token"
 
 RETRYABLE_STATUS_CODES = (403, 500, 502, 503, 504)
-
 MANIFEST_RETRYABLE_STATUS_CODES = RETRYABLE_STATUS_CODES + (404,)
-
 REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
 
 _token_cache: dict[str, tuple[str, float]] = {}
@@ -268,16 +269,13 @@ async def _warmup_check_blob(
             if remaining <= 0:
                 break
             try:
-                # 单个 chunk 的等待时间不超过剩余窗口 + 2s 缓冲
                 chunk = await asyncio.wait_for(
                     aiter.__anext__(),
                     timeout=remaining + 2.0,
                 )
             except StopAsyncIteration:
-                # 数据已全部下载完
                 break
             except asyncio.TimeoutError:
-                # 长时间没有新数据
                 break
             chunks.append(chunk)
             total += len(chunk)
@@ -287,7 +285,6 @@ async def _warmup_check_blob(
     elapsed = time.time() - start
     speed = total / elapsed if elapsed > 0 else 0.0
 
-    # 数据提前读完 → 视为达标（小 blob 不值得预热判断）
     if elapsed < warmup_seconds:
         return True, b"".join(chunks), speed, aiter
 
@@ -373,9 +370,7 @@ async def proxy_v2(path: str, request: Request) -> Response:
     proxy_node: ProxyNode | None = None
     last_error = None
     attempts_log: list[str] = []
-    warmup_buffer: bytes = b""  # 预热阶段已下载的数据（需在正式转发前发送）
-    # 【v1.1.1 修复】预热阶段创建的迭代器，供 iter_response 复用，
-    # 避免 httpx 抛 StreamConsumed。
+    warmup_buffer: bytes = b""
     warmup_aiter: Optional[AsyncIterator[bytes]] = None
 
     _header_to = config.proxy.blob_header_timeout
@@ -470,8 +465,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
 
         # ============================================================
         #  blob 预热测速
-        #    在把响应发给客户端之前，先下载一小段数据评估速度，
-        #    低速则切换下一个候选节点（客户端完全无感知）。
         # ============================================================
         if _is_blob_request and _warmup_seconds > 0 and _low_threshold > 0:
             warmup_ok, warmup_chunks, warmup_speed, warmup_aiter = await _warmup_check_blob(
@@ -486,7 +479,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
                     f"节点 {node.name} 预热测速不达标：{speed_kb:.1f} KB/s " f"< {thr_kb:.1f} KB/s（窗口 {_warmup_seconds:.1f}s），切换下一个候选"
                 )
                 attempts_log.append(f"{node.name}:warmup-slow({speed_kb:.0f}KB/s)")
-                # 丢弃本节点的响应与迭代器
                 warmup_aiter = None
                 warmup_buffer = b""
                 try:
@@ -587,19 +579,16 @@ async def proxy_v2(path: str, request: Request) -> Response:
         recorded = False
         first_chunk = True
 
-        # 低速监测样本：(timestamp, cumulative_bytes)
         speed_samples: list[tuple[float, int]] = []
 
         def _update_speed_samples():
             now = time.time()
             speed_samples.append((now, total_downloaded))
-            # 保留窗口外的样本（至少保留 2 个用于计算）
             cutoff = now - (_low_duration if _low_duration > 0 else 10.0)
             while len(speed_samples) > 2 and speed_samples[0][0] < cutoff:
                 speed_samples.pop(0)
 
         def _is_low_speed() -> bool:
-            """判断「最近 _low_duration 秒」窗口内的平均速度是否低于阈值。"""
             if _low_duration <= 0 or _low_threshold <= 0:
                 return False
             if len(speed_samples) < 2:
@@ -607,7 +596,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
             oldest_t, oldest_b = speed_samples[0]
             newest_t, newest_b = speed_samples[-1]
             window = newest_t - oldest_t
-            # 窗口需覆盖至少 90% 的目标时长才做判断，避免误判
             if window < _low_duration * 0.9:
                 return False
             speed = (newest_b - oldest_b) / window if window > 0 else 0.0
@@ -633,16 +621,12 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 except Exception as e:
                     logger.error(f"累加拉取字节失败: {e}")
 
-        # 【1】先发送预热缓冲数据
         if warmup_buffer:
             total_downloaded += len(warmup_buffer)
             _update_speed_samples()
             yield warmup_buffer
             warmup_buffer = b""
 
-        # 【2】复用预热阶段创建的迭代器（关键修复）：
-        #     若预热已创建 aiter，则直接复用，避免 httpx 抛 StreamConsumed；
-        #     若未启用预热，则新建一个迭代器。
         if warmup_aiter is not None:
             aiter = warmup_aiter
             warmup_aiter = None
@@ -678,11 +662,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 total_downloaded += len(chunk)
                 _update_speed_samples()
 
-                # ============================================================
-                #  中途低速监测
-                #    最近 _low_duration 秒内的平均速度低于阈值 → 中断流并熔断。
-                #    Docker 客户端会重试，由于该节点已熔断，重试会自动换节点。
-                # ============================================================
                 if _is_blob_request and _is_low_speed():
                     speed_kb = _low_threshold / 1024.0
                     logger.warning(

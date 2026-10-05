@@ -8,7 +8,7 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app import APP_NAME, APP_TAGLINE, __version__
+from app import APP_NAME, APP_TAGLINE, __version__, get_app_config_dict
 
 logger = logging.getLogger("dockerassistant.config")
 
@@ -21,7 +21,7 @@ CONFIG_PATH = CONFIG_DIR / "config.yaml"
 #  内置默认配置
 # ============================================================
 DEFAULT_CONFIG_DICT: dict[str, Any] = {
-    "app": {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__},
+    "app": get_app_config_dict(),
     "server": {"host": "0.0.0.0", "port": 8000, "debug": False},
     "admin": {"user": "admin", "pass": "change_me"},
     "proxy": {
@@ -123,10 +123,10 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
     },
 }
 
-_CONFIG_FILE_HEADER = """\
+_CONFIG_FILE_HEADER = f"""\
 # ============================================================
-#  Docker-Assistant 配置文件  v1.0.0
-#  镜像加速 · 容器更新  —— 一体化管理平台
+#  {APP_NAME} 配置文件  v{__version__}
+#  {APP_TAGLINE}  —— 一体化管理平台
 #
 #  本文件由程序首次启动时自动生成，可直接编辑或通过 Web 后台修改。
 #  Web 后台：打开「配置文件」按钮 → 修改 → 保存并重载。
@@ -404,7 +404,7 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     ensure_config_exists()
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    data["app"] = {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__}
+    data["app"] = get_app_config_dict()
     for key in ("custom_nodes", "manually_disabled"):
         if data.get(key) is None:
             data[key] = []
@@ -432,7 +432,7 @@ def reload_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 def save_config(path: Path = CONFIG_PATH) -> None:
     data = config.model_dump(mode="json", by_alias=True)
-    data["app"] = {"name": APP_NAME, "tagline": APP_TAGLINE, "version": __version__}
+    data["app"] = get_app_config_dict()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".yaml.tmp")
     with open(tmp, "w", encoding="utf-8") as f:

@@ -9,9 +9,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
-from .registry_client import is_dockerhub, normalize_mirror
+from app.registry import is_dockerhub, normalize_mirror
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("dockerassistant.docker")
 
 
 class PullCancelled(Exception):
@@ -222,16 +222,6 @@ class DockerService:
 
                 # ========================================================
                 #  【v1.1.1 关键修复】清理代理前缀 tag
-                #
-                #  当 src != image_ref 时，说明本次走了镜像加速源，
-                #  Docker 会为镜像自动打上 "<src>" 前缀 tag（例如
-                #  "127.0.0.1:8000/ekkoye8888/hermes-web-ui:latest"）。
-                #
-                #  这里先补上 image_ref 这个"原始 tag"，然后立刻删除
-                #  代理前缀 tag —— 镜像本体因为有原始 tag 引用而保留，
-                #  只是不再挂前缀 tag。
-                #
-                #  失败时仅告警，不影响主流程（镜像层已经拉取成功）。
                 # ========================================================
                 if src != image_ref:
                     try:
@@ -245,12 +235,9 @@ class DockerService:
                         try:
                             img.tag(image_ref)
                         except Exception as e:
-                            # 打原始 tag 失败：镜像本体还在（src tag 引用着），
-                            # 但容器无法用 image_ref 引用它，需要向上暴露错误
                             logger.error("添加原始标签 %s 失败: %s", image_ref, e)
                             raise
 
-                        # 打 tag 成功后，安全地删除代理前缀 tag
                         try:
                             self.client.images.remove(image=src, force=False, noprune=False)
                             logger.info("已移除代理前缀标签 %s（保留原始标签 %s）", src, image_ref)
@@ -285,11 +272,7 @@ class DockerService:
     # ================================================================== #
     @staticmethod
     def _strip_mirror_prefix(tag: str, prefixes: List[str]) -> Optional[str]:
-        """从 tag 剥离已知前缀，返回原始 tag；无匹配返回 None。
-
-        例：tag="127.0.0.1:8000/foo/bar:latest"，prefixes=["127.0.0.1:8000"]
-           → "foo/bar:latest"
-        """
+        """从 tag 剥离已知前缀，返回原始 tag；无匹配返回 None。"""
         if not tag or not prefixes:
             return None
         t = tag
@@ -308,14 +291,7 @@ class DockerService:
         return DockerService._strip_mirror_prefix(tag, prefixes) is not None
 
     def cleanup_mirror_prefix_tags(self, mirror_prefixes: List[str]) -> Dict[str, Any]:
-        """扫描所有镜像，删除以指定代理前缀开头的 tag。
-
-        设计：
-          - 只删除前缀 tag，镜像本体保留（由原始 tag 继续引用）。
-          - 若某镜像**只有**前缀 tag（没有其他 tag），跳过不删，
-            以免误删镜像本体。
-          - 每个 tag 删除失败（如被容器引用）不中断，记录到 failed。
-        """
+        """扫描所有镜像，删除以指定代理前缀开头的 tag。"""
         prefixes = [p.strip().rstrip("/") for p in (mirror_prefixes or []) if p and p.strip()]
         if not prefixes:
             return {"ok": True, "removed": [], "failed": [], "skipped": []}
@@ -340,7 +316,6 @@ class DockerService:
 
             non_prefix_tags = [t for t in tags if t not in prefix_tags]
             if not non_prefix_tags:
-                # 保护：镜像只剩前缀 tag，跳过避免误删镜像本体
                 skipped.extend(prefix_tags)
                 continue
 
@@ -599,13 +574,8 @@ class DockerService:
     ) -> List[Dict[str, Any]]:
         """列出本地镜像，每个镜像一条记录。
 
-        【v1.1.1 增强】mirror_prefixes 提供时，会把每个 tag 上的代理前缀剥离：
-
-          "127.0.0.1:8000/ekkoye8888/hermes-web-ui:latest"
-            → "ekkoye8888/hermes-web-ui:latest"
-
+        【v1.1.1 增强】mirror_prefixes 提供时，会把每个 tag 上的代理前缀剥离。
         剥离仅影响展示层，不修改 Docker 存储（存储层由 pull_image 清理）。
-        同时返回 raw_tags 以便调试。
         """
         counts = self._image_reference_counts()
         prefixes = [p.strip().rstrip("/") for p in (mirror_prefixes or []) if p and p.strip()]
@@ -615,7 +585,6 @@ class DockerService:
             attrs = img.attrs or {}
             raw_tags = list(img.tags or [])
 
-            # 显示层：剥离代理前缀；同一镜像内去重
             display_tags: List[str] = []
             seen: set = set()
             for t in raw_tags:
@@ -642,7 +611,6 @@ class DockerService:
                     "size": size,
                     "created": attrs.get("Created") or "",
                     "containers": containers,
-                    # dangling 判断基于原始 tags（镜像本体是否被任何 tag 引用）
                     "dangling": len(raw_tags) == 0,
                 }
             )

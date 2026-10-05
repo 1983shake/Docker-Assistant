@@ -1,4 +1,4 @@
-"""不拉取镜像即可查询远程 manifest digest 的 Registry v2 客户端。"""
+"""Registry v2 客户端（查询远程 digest）+ Docker Hub 搜索。"""
 
 from __future__ import annotations
 
@@ -8,14 +8,16 @@ import logging
 import re
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import requests
 
-logger = logging.getLogger(__name__)
+from app.config import config
+
+logger = logging.getLogger("dockerassistant.registry")
 
 DOCKER_HUB_REGISTRIES = {"registry-1.docker.io", "docker.io", "index.docker.io"}
-AUTH_URL = "https://auth.docker.io/token"
 
 ACCEPT_HEADERS = ", ".join(
     [
@@ -28,14 +30,50 @@ ACCEPT_HEADERS = ", ".join(
 )
 
 
-# --------------------------------------------------------------------------- #
-class CircuitBreaker:
-    """按镜像源维护失败计数：连续失败达阈值后进入冷却（熔断），冷却结束半开探测。
+# ============================================================
+#  解析工具
+# ============================================================
 
-    - closed    ：正常
-    - open      ：熔断中，跳过
-    - half-open ：冷却结束，允许一次探测
-    """
+
+def parse_image_reference(ref: str) -> Tuple[str, str, str]:
+    """拆解镜像引用为 (registry, repository, tag)。"""
+    ref = (ref or "").strip()
+    if "@" in ref:
+        ref = ref.split("@", 1)[0]
+
+    tag = "latest"
+    last = ref.rsplit("/", 1)[-1]
+    if ":" in last:
+        ref, tag = ref.rsplit(":", 1)
+
+    parts = ref.split("/")
+    if len(parts) == 1:
+        registry, repository = "registry-1.docker.io", f"library/{ref}"
+    elif "." in parts[0] or ":" in parts[0] or parts[0] == "localhost":
+        registry, repository = parts[0], "/".join(parts[1:])
+    else:
+        registry, repository = "registry-1.docker.io", ref
+    return registry, repository, tag
+
+
+def normalize_mirror(mirror: str) -> str:
+    m = (mirror or "").strip()
+    m = re.sub(r"^https?://", "", m)
+    return m.rstrip("/")
+
+
+def is_dockerhub(image_ref: str) -> bool:
+    registry, _, _ = parse_image_reference(image_ref)
+    return registry in DOCKER_HUB_REGISTRIES
+
+
+# ============================================================
+#  熔断器
+# ============================================================
+
+
+class CircuitBreaker:
+    """按镜像源维护失败计数，连续失败达阈值后进入冷却。"""
 
     def __init__(self, threshold: int = 3, cooldown: int = 300) -> None:
         self.threshold = max(1, int(threshold))
@@ -44,7 +82,6 @@ class CircuitBreaker:
         self._failures: Dict[str, int] = {}
         self._opened_at: Dict[str, float] = {}
 
-    # ------------------------------------------------------------------ #
     def _state_locked(self, key: str) -> str:
         opened = self._opened_at.get(key)
         if opened is None:
@@ -67,7 +104,6 @@ class CircuitBreaker:
                 return 0
             return max(0, int(self.cooldown - (time.time() - opened)))
 
-    # ------------------------------------------------------------------ #
     def record_success(self, key: str) -> None:
         with self._lock:
             was_open = key in self._opened_at
@@ -87,87 +123,28 @@ class CircuitBreaker:
             else:
                 self._failures[key] = count
                 tripped = False
-
         if was_open:
             logger.warning("[熔断] 镜像源 [%s] 半开探测失败，继续熔断 %d 秒", key, self.cooldown)
         elif tripped:
-            logger.warning(
-                "[熔断] 镜像源 [%s] 连续失败 %d 次，进入熔断（冷却 %d 秒）",
-                key,
-                count,
-                self.cooldown,
-            )
-        else:
-            logger.info("[熔断] 镜像源 [%s] 失败计数 %d/%d", key, count, self.threshold)
-
-    def snapshot(self) -> Dict[str, Dict[str, object]]:
-        with self._lock:
-            keys = set(self._failures) | set(self._opened_at)
-            return {
-                k: {
-                    "state": self._state_locked(k),
-                    "failures": self._failures.get(k, 0),
-                    "remaining": self.remaining(k),
-                }
-                for k in keys
-            }
+            logger.warning("[熔断] 镜像源 [%s] 连续失败 %d 次，冷却 %d 秒", key, count, self.cooldown)
 
 
-# 全局熔断器：连续失败 3 次熔断 5 分钟
 breaker = CircuitBreaker(threshold=3, cooldown=300)
 
 
-# --------------------------------------------------------------------------- #
-def parse_image_reference(ref: str) -> Tuple[str, str, str]:
-    """拆解镜像引用为 (registry, repository, tag)。"""
-    ref = (ref or "").strip()
-    if "@" in ref:
-        ref = ref.split("@", 1)[0]
-
-    tag = "latest"
-    last = ref.rsplit("/", 1)[-1]
-    if ":" in last:
-        ref, tag = ref.rsplit(":", 1)
-
-    parts = ref.split("/")
-    if len(parts) == 1:
-        registry, repository = "registry-1.docker.io", f"library/{ref}"
-    elif "." in parts[0] or ":" in parts[0] or parts[0] == "localhost":
-        registry, repository = parts[0], "/".join(parts[1:])
-    else:
-        registry, repository = "registry-1.docker.io", ref
-
-    return registry, repository, tag
+# ============================================================
+#  Registry v2 查询
+# ============================================================
 
 
-def normalize_mirror(mirror: str) -> str:
-    m = (mirror or "").strip()
-    m = re.sub(r"^https?://", "", m)
-    return m.rstrip("/")
-
-
-def is_dockerhub(image_ref: str) -> bool:
-    registry, _, _ = parse_image_reference(image_ref)
-    return registry in DOCKER_HUB_REGISTRIES
-
-
-def _fetch_auth(
-    session: requests.Session,
-    scheme: str,
-    registry: str,
-    repository: str,
-    username: Optional[str],
-    password: Optional[str],
-) -> Optional[str]:
+def _fetch_auth(session, scheme, registry, repository, username, password) -> Optional[str]:
     base = f"{scheme}://{registry}"
     try:
         r = session.get(f"{base}/v2/", timeout=10)
     except requests.RequestException:
         return None
-
     if r.status_code != 401:
         return None
-
     challenge = r.headers.get("WWW-Authenticate", "")
     low = challenge.lower()
 
@@ -205,14 +182,7 @@ def _fetch_auth(
     return None
 
 
-def get_remote_digest(
-    image_ref: str,
-    mirror: Optional[str] = None,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    timeout: int = 20,
-) -> Optional[str]:
-    """返回远程 manifest digest（形如 sha256:...），失败返回 None。"""
+def get_remote_digest(image_ref, mirror=None, username=None, password=None, timeout=20) -> Optional[str]:
     target = f"{normalize_mirror(mirror)}/{image_ref}" if mirror else image_ref
     registry, repository, tag = parse_image_reference(target)
 
@@ -223,7 +193,6 @@ def get_remote_digest(
             auth = _fetch_auth(session, scheme, registry, repository, username, password)
             if auth:
                 headers["Authorization"] = auth
-
             url = f"{scheme}://{registry}/v2/{repository}/manifests/{tag}"
             r = session.head(url, headers=headers, timeout=timeout, allow_redirects=True)
             if r.status_code == 405:
@@ -234,7 +203,6 @@ def get_remote_digest(
                     return digest
                 if r.content:
                     return "sha256:" + hashlib.sha256(r.content).hexdigest()
-            logger.debug("registry %s 返回 %s (%s)", target, r.status_code, scheme)
             if r.status_code in (400, 401, 403, 404):
                 continue
         except requests.RequestException as e:
@@ -243,29 +211,15 @@ def get_remote_digest(
     return None
 
 
-# --------------------------------------------------------------------------- #
-def _probe_source(
-    key: str,
-    image_ref: str,
-    mirror: Optional[str],
-    username: Optional[str],
-    password: Optional[str],
-) -> Optional[str]:
-    """带熔断保护地探测单个镜像源；日志中提示源状态。"""
+def _probe_source(key, image_ref, mirror, username, password) -> Optional[str]:
     if not breaker.allow(key):
-        logger.warning(
-            "[跳过] 镜像源 [%s] 处于熔断状态（剩余 %d 秒），跳过 %s",
-            key,
-            breaker.remaining(key),
-            image_ref,
-        )
+        logger.warning("[跳过] 镜像源 [%s] 熔断中（剩余 %d 秒）", key, breaker.remaining(key))
         return None
-
     state = breaker.state(key)
     if state == "half-open":
-        logger.info("[熔断] 镜像源 [%s] 冷却结束，进行半开探测：%s", key, image_ref)
+        logger.info("[熔断] 镜像源 [%s] 冷却结束，半开探测：%s", key, image_ref)
     else:
-        logger.info("[检测] 使用镜像源 [%s] 查询 %s", key, image_ref)
+        logger.info("[检测] 镜像源 [%s] 查询 %s", key, image_ref)
 
     digest = get_remote_digest(image_ref, mirror=mirror, username=username, password=password)
     if digest:
@@ -283,7 +237,7 @@ def get_remote_digests_multi(
     password: Optional[str] = None,
     use_direct: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """依次尝试加速源、再直连（均带熔断保护）。返回 (digest, source)。"""
+    """依次尝试加速源、再直连。返回 (digest, source)。"""
     if is_dockerhub(image_ref):
         for m in mirrors or []:
             m = (m or "").strip()
@@ -293,8 +247,6 @@ def get_remote_digests_multi(
             d = _probe_source(key, image_ref, m, username, password)
             if d:
                 return d, key
-
-        # Docker Hub 官方兜底
         key = "registry-1.docker.io"
         d = _probe_source(key, image_ref, None, username, password)
         if d:
@@ -307,3 +259,51 @@ def get_remote_digests_multi(
         if d:
             return d, key
     return None, None
+
+
+# ============================================================
+#  Docker Hub 搜索
+# ============================================================
+
+
+async def search_docker_hub(q: str, page_size: int = 25) -> dict[str, Any]:
+    q = (q or "").strip()
+    if not q:
+        return {"results": [], "error": "empty query"}
+    if not config.search.enabled:
+        return {"results": [], "error": "search disabled"}
+    if not config.search.upstreams:
+        return {"results": [], "error": "no upstream configured"}
+
+    attempts: list[dict[str, str]] = []
+    async with httpx.AsyncClient(
+        timeout=config.search.timeout,
+        headers={
+            "User-Agent": "Docker-Assistant/1.0",
+            "Accept": "application/json",
+        },
+        follow_redirects=True,
+    ) as client:
+        for upstream in config.search.upstreams:
+            try:
+                logger.info(f"[search] 尝试上游: {upstream.name} -> {upstream.url}")
+                resp = await client.get(upstream.url, params={"query": q, "page_size": page_size})
+                if resp.status_code != 200:
+                    attempts.append({"name": upstream.name, "error": f"HTTP {resp.status_code}"})
+                    continue
+                try:
+                    data = resp.json()
+                except Exception as e:
+                    attempts.append({"name": upstream.name, "error": f"invalid json: {e}"})
+                    continue
+                results = data.get("results") or data.get("data") or data.get("repositories") or []
+                logger.info(f"[search] {upstream.name} 返回 {len(results)} 条")
+                return {"results": results, "source": upstream.name, "count": len(results)}
+            except httpx.TimeoutException:
+                attempts.append({"name": upstream.name, "error": "timeout"})
+            except httpx.ConnectError as e:
+                attempts.append({"name": upstream.name, "error": f"connect failed: {e}"})
+            except Exception as e:
+                attempts.append({"name": upstream.name, "error": str(e)})
+
+    return {"results": [], "error": "all upstreams failed", "attempts": attempts}

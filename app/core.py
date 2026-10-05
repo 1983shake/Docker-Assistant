@@ -1,4 +1,4 @@
-"""内存环形缓冲 + JSONL 本地持久化的日志处理器（来自 DockerImageUpdater）。"""
+"""运行时核心：日志处理器 + 任务进度跟踪。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,11 @@ from typing import Any, Dict, List, Optional
 
 from app.config import DATA_DIR
 
-LOG_FILE = DATA_DIR / "logs.jsonl"
+# ============================================================
+#  Part 1: 日志处理器（内存环形缓冲 + JSONL 持久化）
+# ============================================================
 
+LOG_FILE = Path(DATA_DIR) / "logs.jsonl"
 LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
 
 _NOISY_LOGGERS = (
@@ -34,20 +37,11 @@ _NOISY_LOGGERS = (
 class _NoisyFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         name = record.name or ""
-        for p in _NOISY_LOGGERS:
-            if name == p or name.startswith(p + "."):
-                return False
-        return True
+        return not any(name == p or name.startswith(p + ".") for p in _NOISY_LOGGERS)
 
 
 class MemoryLogHandler(logging.Handler):
-    def __init__(
-        self,
-        capacity: int = 2000,
-        log_file: Optional[Path] = None,
-        max_entries: int = 5000,
-        retention_days: int = 7,
-    ) -> None:
+    def __init__(self, capacity=2000, log_file=None, max_entries=5000, retention_days=7):
         super().__init__(level=logging.DEBUG)
         self._buffer: deque = deque(maxlen=capacity)
         self._lock = threading.RLock()
@@ -63,8 +57,7 @@ class MemoryLogHandler(logging.Handler):
             return
         try:
             with self._file_lock:
-                with self._log_file.open("r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                lines = self._log_file.read_text(encoding="utf-8").splitlines()
         except Exception:
             return
         if self._max_entries and len(lines) > self._max_entries:
@@ -131,15 +124,12 @@ class MemoryLogHandler(logging.Handler):
         retention_days = max(1, int(retention_days))
         max_entries = max(100, int(max_entries))
         cutoff = time.time() - retention_days * 86400
-
         result = {"read": 0, "kept": 0, "removed_expired": 0, "removed_overflow": 0}
         if not self._log_file or not self._log_file.exists():
             return result
-
         try:
             with self._file_lock:
                 lines = self._log_file.read_text(encoding="utf-8").splitlines()
-
             result["read"] = len(lines)
             kept: List[str] = []
             for line in lines:
@@ -155,18 +145,14 @@ class MemoryLogHandler(logging.Handler):
                     result["removed_expired"] += 1
                     continue
                 kept.append(line)
-
             if len(kept) > max_entries:
                 result["removed_overflow"] = len(kept) - max_entries
                 kept = kept[-max_entries:]
-
             result["kept"] = len(kept)
-
             with self._file_lock:
                 tmp = self._log_file.with_suffix(".jsonl.tmp")
                 tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
                 tmp.replace(self._log_file)
-
             with self._lock:
                 new_buf: deque = deque(maxlen=self._buffer.maxlen)
                 for it in self._buffer:
@@ -180,7 +166,6 @@ class MemoryLogHandler(logging.Handler):
         return result
 
 
-# 全局单例：在 main.py 挂到 root logger 上
 log_handler = MemoryLogHandler(
     capacity=2000,
     log_file=LOG_FILE,
@@ -190,3 +175,78 @@ log_handler = MemoryLogHandler(
 log_handler.setLevel(logging.DEBUG)
 log_handler.setFormatter(logging.Formatter("%(message)s"))
 log_handler.addFilter(_NoisyFilter())
+
+
+# ============================================================
+#  Part 2: 任务进度跟踪
+# ============================================================
+
+
+class ProgressTracker:
+    """内存态任务进度，供 Web 实时反馈。
+
+    「已完成任务」保留时长由 config.updater.progress_popup_duration 控制。
+    """
+
+    def __init__(self) -> None:
+        self._progress: dict[str, dict] = {}
+
+    def _ttl(self) -> int:
+        try:
+            from app.config import config  # 延迟导入避免循环
+
+            return max(1, int(getattr(config.updater, "progress_popup_duration", 3) or 3))
+        except Exception:
+            return 3
+
+    def start(self, task: str, label: str, total: int = 0, message: str = ""):
+        self._progress[task] = {
+            "label": label,
+            "running": True,
+            "done": 0,
+            "total": total,
+            "message": message,
+            "percent": 0,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+        }
+
+    def update(self, task: str, **kwargs):
+        entry = self._progress.get(task)
+        if entry is None:
+            entry = {
+                "label": task,
+                "running": True,
+                "done": 0,
+                "total": 0,
+                "message": "",
+                "percent": 0,
+                "started_at": time.time(),
+            }
+            self._progress[task] = entry
+        entry.update(kwargs)
+        total = entry.get("total") or 0
+        done = entry.get("done") or 0
+        entry["percent"] = int(done / total * 100) if total > 0 else 0
+        entry["updated_at"] = time.time()
+
+    def finish(self, task: str, message: str = "完成"):
+        entry = self._progress.get(task)
+        if entry is None:
+            return
+        entry["running"] = False
+        entry["message"] = message
+        entry["percent"] = 100
+        entry["updated_at"] = time.time()
+
+    def get_all(self) -> dict:
+        now = time.time()
+        ttl = self._ttl()
+        for k in list(self._progress.keys()):
+            v = self._progress[k]
+            if not v.get("running") and now - v.get("updated_at", 0) > ttl:
+                self._progress.pop(k, None)
+        return {k: dict(v) for k, v in self._progress.items()}
+
+
+progress = ProgressTracker()
