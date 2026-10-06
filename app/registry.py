@@ -237,27 +237,34 @@ def get_remote_digests_multi(
     password: Optional[str] = None,
     use_direct: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """依次尝试加速源、再直连。返回 (digest, source)。"""
-    if is_dockerhub(image_ref):
-        for m in mirrors or []:
-            m = (m or "").strip()
-            if not m:
-                continue
-            key = normalize_mirror(m)
-            d = _probe_source(key, image_ref, m, username, password)
-            if d:
-                return d, key
-        key = "registry-1.docker.io"
-        d = _probe_source(key, image_ref, None, username, password)
+    """依次尝试所有镜像源，再直连。返回 (digest, source)。
+
+    【修复】原先只有 Docker Hub 镜像才会尝试 mirrors，导致 GHCR / GCR /
+    Quay / MCR / NVCR / Elastic 等 registry 的检测被强制直连（在国内
+    网络环境下必然超时），与 updater_service._resolve_check_source() 声明
+    的策略（"已知 registry 走节点路由"）相悖。
+
+    现在统一对所有 registry 生效：
+      1) 先按顺序尝试所有配置的镜像源（含内置 "local" → 本机代理）
+      2) 全部失败（或 mirrors 为空）后，若 use_direct=True 再直连上游
+    """
+    # ---- 1) 尝试所有镜像源（Docker Hub / GHCR / GCR / Quay / ... 通用）----
+    for m in mirrors or []:
+        m = (m or "").strip()
+        if not m:
+            continue
+        key = normalize_mirror(m)
+        d = _probe_source(key, image_ref, m, username, password)
         if d:
             return d, key
-        return None, None
 
+    # ---- 2) 直连回退 ----
     if use_direct:
         key = parse_image_reference(image_ref)[0]
         d = _probe_source(key, image_ref, None, username, password)
         if d:
             return d, key
+
     return None, None
 
 
