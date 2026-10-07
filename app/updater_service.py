@@ -577,7 +577,7 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
         if _is_cancelled(container_name):
             raise PullCancelled()
 
-        progress.update(task_key, done=15, message="拉取镜像…")
+        progress.update(task_key, done=15, message="连接镜像源，准备拉取…")
         logger.info(
             "[%s] 拉取镜像 %s（策略：%s；加速源：%s）",
             container_name,
@@ -588,15 +588,33 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
 
         running_updates[container_name] = "pulling"
 
-        _PULL_DONE_MIN = 15
+        # ============================================================
+        #  拉取阶段进度区间（百分比）
+        #    15 → 25：速度预热 / 连接
+        #    25 → 60：下载（按字节比例）
+        #    60 → 78：解压（按层比例）
+        #    78 → 80：拉取完成
+        # ============================================================
+        _PREP_DONE_MIN = 15
+        _PREP_DONE_MAX = 25
+        _DOWNLOAD_DONE_MIN = 25
+        _DOWNLOAD_DONE_MAX = 60
+        _EXTRACT_DONE_MIN = 60
+        _EXTRACT_DONE_MAX = 78
         _PULL_DONE_MAX = 80
+
         _EMIT_INTERVAL = 0.4
+        _PREP_PSEUDO_DURATION = 8.0  # 预热阶段按 8 秒走满 15 → 25
 
         _pull_state: Dict[str, float] = {
             "max_current": 0,
             "max_total": 0,
-            "last_done": _PULL_DONE_MIN,
+            "max_layers_total": 0,
+            "max_layers_downloaded": 0,
+            "max_layers_extracted": 0,
+            "last_done": _PREP_DONE_MIN,
             "last_emit": 0.0,
+            "started_at": time.time(),
         }
 
         def _fmt_bytes(n: int) -> str:
@@ -613,16 +631,42 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
             return f"{v:.1f} {units[i]}"
 
         def _on_pull_progress(ev: Dict[str, Any]) -> None:
+            """拉取进度回调（分阶段）。
+
+            事件来自 docker_service.pull_image，包含：
+              - phase: preparing / downloading / extracting / ready
+              - status: 原始 Docker 状态字符串
+              - current / total: 已下载 / 总下载字节（仅 downloading 阶段有意义）
+              - layers_total / layers_downloaded / layers_extracted: 层计数
+
+            进度值 done 按四阶段分段计算：
+              ① 准备（预热）：15 → 25
+              ② 下载：       25 → 60
+              ③ 解压：       60 → 78
+              ④ 完成：       78 → 80（由外部显式设置）
+            """
             if not isinstance(ev, dict):
                 return
 
+            phase = (ev.get("phase") or "").strip()
+            status = (ev.get("status") or "").strip()
             cur = int(ev.get("current") or 0)
             tot = int(ev.get("total") or 0)
+            layers_total = int(ev.get("layers_total") or 0)
+            layers_downloaded = int(ev.get("layers_downloaded") or 0)
+            layers_extracted = int(ev.get("layers_extracted") or 0)
 
+            # 累积最大值，防止事件乱序导致进度回退
             if tot > _pull_state["max_total"]:
                 _pull_state["max_total"] = tot
             if cur > _pull_state["max_current"]:
                 _pull_state["max_current"] = cur
+            if layers_total > _pull_state["max_layers_total"]:
+                _pull_state["max_layers_total"] = layers_total
+            if layers_downloaded > _pull_state["max_layers_downloaded"]:
+                _pull_state["max_layers_downloaded"] = layers_downloaded
+            if layers_extracted > _pull_state["max_layers_extracted"]:
+                _pull_state["max_layers_extracted"] = layers_extracted
 
             now = time.time()
             if now - _pull_state["last_emit"] < _EMIT_INTERVAL:
@@ -631,26 +675,63 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
 
             total_b = int(_pull_state["max_total"])
             cur_b = int(_pull_state["max_current"])
+            lt = int(_pull_state["max_layers_total"])
+            ld = int(_pull_state["max_layers_downloaded"])
+            le = int(_pull_state["max_layers_extracted"])
 
-            if total_b <= 0:
-                progress.update(task_key, message="拉取镜像（准备中…）")
-                return
+            done = int(_pull_state["last_done"])
+            msg = "连接镜像源，准备拉取…"
 
-            ratio = cur_b / total_b
-            if ratio > 1.0:
-                ratio = 1.0
-            done = _PULL_DONE_MIN + int(ratio * (_PULL_DONE_MAX - _PULL_DONE_MIN))
+            # ========================================================
+            #  按阶段计算 done / message
+            # ========================================================
+            if phase == "ready":
+                done = _PULL_DONE_MAX
+                msg = "拉取完成，准备重建…"
 
+            elif phase == "extracting":
+                # ③ 解压阶段：60 → 78
+                if lt > 0:
+                    ratio = min(1.0, le / lt)
+                    done = _EXTRACT_DONE_MIN + int(ratio * (_EXTRACT_DONE_MAX - _EXTRACT_DONE_MIN))
+                    msg = f"解压镜像 {le}/{lt} 层"
+                else:
+                    done = _EXTRACT_DONE_MIN
+                    msg = f"解压镜像：{status or '进行中'}"
+
+            elif phase == "downloading":
+                # ② 下载阶段：25 → 60
+                if total_b > 0:
+                    ratio = min(1.0, cur_b / total_b)
+                    done = _DOWNLOAD_DONE_MIN + int(ratio * (_DOWNLOAD_DONE_MAX - _DOWNLOAD_DONE_MIN))
+                    msg = f"下载镜像 {_fmt_bytes(cur_b)} / {_fmt_bytes(total_b)}"
+                    if lt > 0:
+                        msg += f"（{ld}/{lt} 层）"
+                elif lt > 0 and ld > 0:
+                    ratio = min(1.0, ld / lt)
+                    done = _DOWNLOAD_DONE_MIN + int(ratio * (_DOWNLOAD_DONE_MAX - _DOWNLOAD_DONE_MIN))
+                    msg = f"下载镜像（{ld}/{lt} 层）"
+                else:
+                    done = _DOWNLOAD_DONE_MIN
+                    msg = "下载镜像（准备中…）"
+
+            else:
+                # ① 准备 / 速度预热阶段：15 → 25
+                elapsed = now - _pull_state["started_at"]
+                prep_ratio = min(0.95, elapsed / _PREP_PSEUDO_DURATION)
+                done = _PREP_DONE_MIN + int(prep_ratio * (_PREP_DONE_MAX - _PREP_DONE_MIN))
+                if status:
+                    msg = f"准备拉取：{status}"
+                else:
+                    msg = "连接镜像源，准备拉取…"
+
+            # 单调递增
             if done < _pull_state["last_done"]:
                 done = int(_pull_state["last_done"])
             else:
                 _pull_state["last_done"] = done
 
-            progress.update(
-                task_key,
-                done=done,
-                message=f"拉取镜像 {_fmt_bytes(cur_b)} / {_fmt_bytes(total_b)}",
-            )
+            progress.update(task_key, done=int(done), message=msg)
 
         def _pull():
             return docker_service.pull_image(
@@ -669,6 +750,9 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
             logger.info("[%s] 拉取完成，但已在重建前收到取消请求", container_name)
             raise PullCancelled()
 
+        # ============================================================
+        #  ④ 重建容器阶段：80 → 95
+        # ============================================================
         running_updates[container_name] = "recreating"
         progress.update(task_key, done=85, message="重建容器…")
         logger.info("[%s] 重建容器（镜像 %s，来源 %s）", container_name, image_ref, source)
@@ -687,6 +771,9 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
         except Exception as e:
             logger.warning("[%s] 自动清理 pin 策略失败: %s", container_name, e)
 
+        # ============================================================
+        #  校验阶段：95 → 100
+        # ============================================================
         progress.update(task_key, done=95, message="校验更新结果（查询远程 digest）…")
         logger.info("[%s] 开始更新后版本校验", container_name)
 

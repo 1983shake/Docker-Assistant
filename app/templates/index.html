@@ -289,6 +289,9 @@
         .header-stat-chip.error { background: rgba(239,68,68,.2); border-color: rgba(239,68,68,.5); }
         .header-stat-chip.unused { background: rgba(99,102,241,.2); border-color: rgba(99,102,241,.5); }
         .header-stat-chip.dangling { background: rgba(148,163,184,.2); border-color: rgba(148,163,184,.5); }
+        .header-stat-chip.net { background: rgba(16,185,129,.18); border-color: rgba(16,185,129,.5); cursor: default; }
+        .header-stat-chip.net:hover { background: rgba(16,185,129,.25); }
+        .header-stat-chip.net.active { box-shadow: 0 0 0 2px rgba(16,185,129,.3); }
         .header-stat-chip .num { font-family: "JetBrains Mono", monospace; font-weight: 700; }
         .header-stat-chip.zero { opacity: .5; }
 
@@ -313,7 +316,6 @@
         }
         .task-cancel-btn:hover { background: rgba(239,68,68,.2); }
 
-        /* ---------- 状态浮窗 · 通知卡片 ---------- */
         .status-notif {
             display: flex;
             align-items: flex-start;
@@ -333,6 +335,9 @@
         .status-notif.err  .n-ico { color: #ef4444; }
         .status-notif.info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
         .status-notif.info .n-ico { color: #3b82f6; }
+
+        .modal-layer-1 { z-index: 50; }
+        .modal-layer-2 { z-index: 60; }
     </style>
 
     <script src="https://cdn.tailwindcss.com/3.4.1"></script>
@@ -408,6 +413,14 @@
                                   :title="'悬空镜像数：' + updSummary.dangling + '（点击查看镜像管理）'">
                                 <i class="fas fa-ghost"></i>
                                 悬空 <span class="num">[[ updSummary.dangling ]]</span>
+                            </span>
+
+                            <span class="header-stat-chip net"
+                                  :class="{ zero: netSpeed.total_bps < 1024, active: netSpeed.total_bps >= 1024 * 1024 }"
+                                  :title="'当前代理传输速率（' + netSpeed.window + ' 秒滑动平均）\n下载 ↓ / 上传 ↑'">
+                                <i class="fas fa-exchange-alt"></i>
+                                <span class="num">↓ [[ netSpeedText(netSpeed.down_bps) ]]</span>
+                                <span class="num">↑ [[ netSpeedText(netSpeed.up_bps) ]]</span>
                             </span>
                         </div>
                     </div>
@@ -516,12 +529,23 @@
                                 <span>勾选节点后，可对选中节点执行「在线检测」「速度测试」「批量禁用/启用」。任务进度会统一显示在右下角浮层。</span>
                             </div>
 
+                            <!-- ============================================================
+                                 ★ 加速节点表格
+                                 · table 加 auto-layout 类：启用 table-layout:auto
+                                 · colgroup 里除 URL 列外全部 width:1%：让浏览器把它们
+                                   压缩到刚好容纳内容；URL 列不带 width，自动占满剩余
+                                 ============================================================ -->
                             <div class="w-full bg-white border border-gray-200 rounded-xl overflow-x-auto shadow-sm">
-                                <table class="node-table">
+                                <table class="node-table auto-layout">
                                     <colgroup>
-                                        <col style="width: 34px"><col style="width: 104px"><col style="width: 138px">
-                                        <col><col style="width: 96px"><col style="width: 92px">
-                                        <col style="width: 82px"><col style="width: 118px">
+                                        <col style="width: 1%">   <!-- checkbox -->
+                                        <col style="width: 1%">   <!-- 状态 -->
+                                        <col style="width: 1%">   <!-- 名称 -->
+                                        <col>                      <!-- URL：占满剩余空间 -->
+                                        <col style="width: 1%">   <!-- 标签 -->
+                                        <col style="width: 1%">   <!-- 速度 -->
+                                        <col style="width: 1%">   <!-- 流量 -->
+                                        <col style="width: 1%">   <!-- 操作 -->
                                     </colgroup>
                                     <thead>
                                         <tr>
@@ -651,65 +675,6 @@
                                     </div>
                                 </div>
                                 <div v-if="stats.length === 0" class="text-gray-400 text-center py-10 text-sm">暂无流量数据</div>
-                            </div>
-
-                            <div class="bg-white rounded-xl shadow-md p-5">
-                                <h3 class="text-lg font-bold text-gray-800 mb-3 tracking-tight">搜索 & 拉取 Docker 镜像</h3>
-                                <div class="relative mb-3">
-                                    <input type="text" v-model="searchQuery" @keyup.enter="search" :disabled="searching"
-                                        placeholder="搜索镜像 (例如: ubuntu, nginx)..."
-                                        class="w-full px-3 py-2 pr-11 rounded-lg text-gray-800 border border-gray-200 focus:outline-none focus:border-blue-500 text-sm disabled:opacity-60 placeholder:text-gray-400">
-                                    <button @click="search" :disabled="searching"
-                                        class="absolute right-1.5 top-1/2 -translate-y-1/2 bg-blue-600 text-white px-3 py-1 rounded-md hover:bg-blue-700 transition disabled:opacity-60 text-sm">
-                                        <i class="fas" :class="searching ? 'fa-spinner fa-spin' : 'fa-search'"></i>
-                                    </button>
-                                </div>
-                                <div v-if="searching" class="text-center py-6 text-gray-500 text-sm">
-                                    <i class="fas fa-spinner fa-spin text-xl mb-2 block"></i>
-                                    正在搜索 "[[ searchQuery ]]"…
-                                </div>
-                                <div v-else-if="searchError" class="text-center py-6">
-                                    <i class="fas fa-exclamation-triangle text-2xl text-yellow-500 mb-2 block"></i>
-                                    <p class="text-gray-700 text-sm leading-relaxed">[[ searchError ]]</p>
-                                    <button @click="search" class="mt-3 px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs">
-                                        <i class="fas fa-redo mr-1"></i> 重试
-                                    </button>
-                                </div>
-                                <div v-else-if="searchResults.length > 0">
-                                    <div class="flex justify-between items-center mb-2">
-                                        <span class="text-xs text-gray-500">
-                                            <span class="mono-num">[[ searchResults.length ]]</span> 条
-                                            <span v-if="searchSource"> · 来源：[[ searchSource ]]</span>
-                                        </span>
-                                        <button @click="searchResults = []; searchError = ''; searchQuery = ''"
-                                            class="text-xs text-gray-500 hover:text-gray-700">
-                                            <i class="fas fa-times mr-1"></i>清除
-                                        </button>
-                                    </div>
-                                    <div class="max-h-[520px] overflow-y-auto space-y-2 pr-1">
-                                        <div v-for="(img, idx) in searchResults" :key="img.slug || img.repo_name || idx"
-                                            class="border border-gray-200 rounded-lg p-3 hover:shadow-md transition">
-                                            <div class="flex items-start justify-between gap-2">
-                                                <div class="min-w-0 flex-1">
-                                                    <h4 class="font-bold text-sm text-blue-600 truncate" :title="img.repo_name">[[ img.repo_name ]]</h4>
-                                                    <p class="text-xs text-gray-500 mt-1 line-clamp-2 leading-relaxed">[[ img.short_description || '（无描述）' ]]</p>
-                                                </div>
-                                                <div class="text-yellow-500 flex items-center space-x-0.5 shrink-0">
-                                                    <i class="fas fa-star text-[10px]"></i>
-                                                    <span class="text-[11px] font-bold mono-num">[[ img.star_count || 0 ]]</span>
-                                                </div>
-                                            </div>
-                                            <div class="mt-2 pt-2 border-t border-gray-100 flex items-center gap-2">
-                                                <code class="bg-gray-100 px-1.5 py-1 rounded text-[11px] select-all overflow-hidden text-ellipsis whitespace-nowrap flex-1 text-gray-700">
-                                                    docker pull [[ host ]]/[[ (img.repo_name && img.repo_name.includes('/')) ? img.repo_name : 'library/' + (img.repo_name || '') ]]
-                                                </code>
-                                                <button @click="copyCommand(img)" class="text-gray-400 hover:text-blue-600 shrink-0" title="复制命令">
-                                                    <i class="fas fa-copy text-xs"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -845,9 +810,7 @@
             </main>
         </div>
 
-        <!-- ============================================================
-             统一状态浮窗
-             ============================================================ -->
+        <!-- 状态浮窗 -->
         <div v-if="showStatusPopup" class="fixed bottom-5 right-5 z-40 w-80">
             <div class="bg-white rounded-lg shadow-2xl border border-gray-200 overflow-hidden">
                 <div class="gradient-bg text-white px-4 py-2 flex justify-between items-center">
@@ -859,7 +822,6 @@
                     </span>
                 </div>
                 <div class="p-3 space-y-3 max-h-96 overflow-y-auto">
-                    <!-- 通知消息区（原 toast 内容） -->
                     <div v-for="n in notifications" :key="'n' + n.id"
                          class="status-notif"
                          :class="n.kind === 'err' ? 'err' : (n.kind === 'info' ? 'info' : 'ok')">
@@ -869,7 +831,6 @@
                         <div class="n-msg">[[ n.msg ]]</div>
                     </div>
 
-                    <!-- 任务进度区 -->
                     <div v-for="t in progressTasks" :key="t.key">
                         <div class="flex justify-between items-center mb-1">
                             <span class="text-xs font-medium text-gray-700">[[ t.label ]]</span>
@@ -910,7 +871,7 @@
         </div>
 
         <!-- Help Modal -->
-        <div v-if="showHelpModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div v-if="showHelpModal" class="modal-layer-1 fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
             <div class="bg-white rounded-lg p-6 w-full max-w-lg">
                 <h3 class="text-lg font-bold mb-3 tracking-tight">[[ helpTitle ]]</h3>
                 <p class="text-gray-600 mb-2 text-sm">使用以下命令通过此代理拉取镜像：</p>
@@ -929,7 +890,7 @@
         </div>
 
         <!-- Pulls History Modal -->
-        <div v-if="showPullsModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div v-if="showPullsModal" class="modal-layer-1 fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
             <div class="bg-white rounded-lg p-6 w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-bold tracking-tight">最近拉取记录</h3>
@@ -1002,7 +963,7 @@
         </div>
 
         <!-- Health Logs Modal -->
-        <div v-if="showLogsModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div v-if="showLogsModal" class="modal-layer-1 fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
             <div class="bg-white rounded-lg p-6 w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-bold tracking-tight">在线检测日志</h3>
@@ -1044,7 +1005,7 @@
         </div>
 
         <!-- Add/Edit Modal -->
-        <div v-if="showAddModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div v-if="showAddModal" class="modal-layer-1 fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
             <div class="bg-white rounded-lg p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
                 <h3 class="text-lg font-bold mb-4 tracking-tight">[[ isEdit ? '编辑' : '添加' ]] 代理节点</h3>
                 <form @submit.prevent="submitNode">
@@ -1104,7 +1065,7 @@
         </div>
 
         <!-- Config Editor Modal -->
-        <div v-if="showConfigModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div v-if="showConfigModal" class="modal-layer-1 fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
             <div class="bg-white rounded-lg w-full max-w-5xl max-h-[92vh] flex flex-col">
                 <div class="px-6 py-4 border-b flex justify-between items-center">
                     <div>
@@ -1142,30 +1103,8 @@
 
                 <div class="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50">
 
-                    <template v-if="activeConfigTab === 'basic'">
-                        <div class="bg-white rounded-lg p-4 border">
-                            <h4 class="text-sm font-bold text-gray-700 mb-3">
-                                应用信息
-                                <span class="text-[10px] text-gray-400 font-normal ml-1">(固定，不可修改)</span>
-                            </h4>
-                            <div class="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">应用名称</label>
-                                    <input :value="configForm.app.name" type="text" readonly disabled
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-gray-100 text-gray-500 cursor-not-allowed">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">标语</label>
-                                    <input :value="configForm.app.tagline" type="text" readonly disabled
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-gray-100 text-gray-500 cursor-not-allowed">
-                                </div>
-                            </div>
-                            <p class="text-[11px] text-gray-400 mt-2 leading-relaxed">
-                                <i class="fas fa-lock mr-1"></i>
-                                应用名称与标语已硬编码固定，无法通过配置文件、Web 后台或 Docker 镜像修改。
-                            </p>
-                        </div>
-
+                    <!-- 通用 -->
+                    <template v-if="activeConfigTab === 'general'">
                         <div class="bg-white rounded-lg p-4 border">
                             <h4 class="text-sm font-bold text-gray-700 mb-3">管理后台认证</h4>
                             <div class="grid grid-cols-2 gap-4">
@@ -1208,9 +1147,54 @@
                                 </div>
                             </div>
                         </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">访问控制</h4>
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        IP 白名单（逗号分隔，支持 CIDR；留空表示不限制）
+                                    </label>
+                                    <input :value="(configForm.access.ip_whitelist || []).join(', ')"
+                                        @input="configForm.access.ip_whitelist = $event.target.value.split(',').map(s => s.trim()).filter(Boolean)"
+                                        type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder="192.168.1.100, 10.0.0.0/8">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        镜像白名单正则（留空不限制）
+                                    </label>
+                                    <input v-model="configForm.access.image_whitelist_regex" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder="^library/.*|^ghcr\.io/.*">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">
+                                        镜像黑名单正则（优先级高于白名单）
+                                    </label>
+                                    <input v-model="configForm.access.image_blacklist_regex" type="text"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
+                                        placeholder=".*:latest$">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">界面</h4>
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">状态浮窗展示（秒）</label>
+                                    <input v-model.number="configForm.updater.progress_popup_duration" type="number" min="1" max="60"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                    <p class="text-[11px] text-gray-400 mt-1">任务完成后浮窗保留时长（默认 3）</p>
+                                </div>
+                            </div>
+                        </div>
                     </template>
 
-                    <template v-if="activeConfigTab === 'proxy'">
+                    <!-- 镜像加速 -->
+                    <template v-if="activeConfigTab === 'mirror'">
                         <div class="bg-white rounded-lg p-4 border">
                             <h4 class="text-sm font-bold text-gray-700 mb-3">超时（秒）</h4>
                             <div class="grid grid-cols-4 gap-4">
@@ -1353,25 +1337,23 @@
                                         @input="configForm.proxy.low_speed_threshold = Math.max(0, parseInt($event.target.value, 10) || 0) * 1024"
                                         type="number" min="0" step="64"
                                         class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                    <p class="text-[11px] text-gray-400 mt-1">默认 512 KB/s，0 表示不限制</p>
+                                    <p class="text-[11px] text-gray-400 mt-1">默认 128 KB/s，0 表示不限制</p>
                                 </div>
                                 <div>
                                     <label class="block text-xs font-medium text-gray-600 mb-1">低速持续时间（秒）</label>
                                     <input v-model.number="configForm.proxy.low_speed_duration" type="number" min="0" step="1"
                                         class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                    <p class="text-[11px] text-gray-400 mt-1">默认 10 秒</p>
+                                    <p class="text-[11px] text-gray-400 mt-1">默认 15 秒</p>
                                 </div>
                                 <div>
                                     <label class="block text-xs font-medium text-gray-600 mb-1">预热探测时长（秒）</label>
                                     <input v-model.number="configForm.proxy.warmup_seconds" type="number" min="0" step="0.5"
                                         class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                    <p class="text-[11px] text-gray-400 mt-1">默认 2 秒，0 表示不预热</p>
+                                    <p class="text-[11px] text-gray-400 mt-1">默认 5 秒，0 表示不预热</p>
                                 </div>
                             </div>
                         </div>
-                    </template>
 
-                    <template v-if="activeConfigTab === 'schedule'">
                         <div class="bg-white rounded-lg p-4 border">
                             <h4 class="text-sm font-bold text-gray-700 mb-3">
                                 自动拉取
@@ -1514,7 +1496,8 @@
                         </div>
                     </template>
 
-                    <template v-if="activeConfigTab === 'updater'">
+                    <!-- 容器列表 -->
+                    <template v-if="activeConfigTab === 'containers'">
                         <div class="bg-white rounded-lg p-4 border">
                             <h4 class="text-sm font-bold text-gray-700 mb-3">
                                 容器更新 · 基础
@@ -1544,12 +1527,6 @@
                                         <input v-model="configForm.updater.auto_update" type="checkbox" class="w-4 h-4 text-blue-600 border-gray-300 rounded">
                                         <span class="text-xs text-gray-500">发现更新自动拉取</span>
                                     </label>
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">状态浮窗展示（秒）</label>
-                                    <input v-model.number="configForm.updater.progress_popup_duration" type="number" min="1" max="60"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                    <p class="text-[11px] text-gray-400 mt-1">任务完成后浮窗保留时长（默认 3）</p>
                                 </div>
                             </div>
                         </div>
@@ -1601,16 +1578,6 @@
                                         <span class="text-xs text-gray-500">拉取时使用加速源</span>
                                     </label>
                                 </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志最大条数</label>
-                                    <input v-model.number="configForm.updater.log_max_entries" type="number"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志保留天数</label>
-                                    <input v-model.number="configForm.updater.log_retention_days" type="number"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                </div>
                             </div>
                             <div class="mt-4">
                                 <h4 class="text-sm font-bold text-gray-700 mb-2">更新源列表</h4>
@@ -1641,72 +1608,8 @@
                         </div>
                     </template>
 
-                    <template v-if="activeConfigTab === 'access'">
-                        <div class="bg-white rounded-lg p-4 border">
-                            <h4 class="text-sm font-bold text-gray-700 mb-3">访问控制</h4>
-                            <div class="space-y-3">
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">
-                                        IP 白名单（逗号分隔，支持 CIDR；留空表示不限制）
-                                    </label>
-                                    <input :value="(configForm.access.ip_whitelist || []).join(', ')"
-                                        @input="configForm.access.ip_whitelist = $event.target.value.split(',').map(s => s.trim()).filter(Boolean)"
-                                        type="text"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
-                                        placeholder="192.168.1.100, 10.0.0.0/8">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">
-                                        镜像白名单正则（留空不限制）
-                                    </label>
-                                    <input v-model="configForm.access.image_whitelist_regex" type="text"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
-                                        placeholder="^library/.*|^ghcr\.io/.*">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">
-                                        镜像黑名单正则（优先级高于白名单）
-                                    </label>
-                                    <input v-model="configForm.access.image_blacklist_regex" type="text"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-blue-500"
-                                        placeholder=".*:latest$">
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="bg-white rounded-lg p-4 border">
-                            <h4 class="text-sm font-bold text-gray-700 mb-3">镜像搜索</h4>
-                            <div class="grid grid-cols-3 gap-4 mb-3">
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">启用</label>
-                                    <label class="flex items-center gap-2 mt-2 cursor-pointer">
-                                        <input v-model="configForm.search.enabled" type="checkbox"
-                                            class="w-4 h-4 text-blue-600 border-gray-300 rounded">
-                                        <span class="text-xs text-gray-500">后端搜索</span>
-                                    </label>
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">每页数量</label>
-                                    <input v-model.number="configForm.search.page_size" type="number"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-gray-600 mb-1">超时（秒）</label>
-                                    <input v-model.number="configForm.search.timeout" type="number" step="0.5"
-                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
-                                </div>
-                            </div>
-                            <div>
-                                <label class="block text-xs font-medium text-gray-600 mb-1">
-                                    搜索代理列表（JSON，形如 [{"name": "x", "url": "..."}]）
-                                </label>
-                                <textarea v-model="configJsonStrings.search_upstreams" spellcheck="false" rows="6"
-                                    class="w-full text-[12px] leading-relaxed border border-gray-200 rounded p-2 bg-gray-50 font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"></textarea>
-                            </div>
-                        </div>
-                    </template>
-
-                    <template v-if="activeConfigTab === 'logging'">
+                    <!-- 运行日志 -->
+                    <template v-if="activeConfigTab === 'logs'">
                         <div class="bg-white rounded-lg p-4 border">
                             <h4 class="text-sm font-bold text-gray-700 mb-3">
                                 日志
@@ -1746,8 +1649,33 @@
                                 </div>
                             </div>
                         </div>
+
+                        <div class="bg-white rounded-lg p-4 border">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">运行日志清理</h4>
+                            <div class="grid grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志最大条数</label>
+                                    <input v-model.number="configForm.updater.log_max_entries" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志保留天数</label>
+                                    <input v-model.number="configForm.updater.log_retention_days" type="number"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 mb-1">日志显示级别</label>
+                                    <select v-model="configForm.updater.log_display_level"
+                                        class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-blue-500">
+                                        <option>DEBUG</option><option>INFO</option>
+                                        <option>WARNING</option><option>ERROR</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
                     </template>
 
+                    <!-- 高级设置 -->
                     <template v-if="activeConfigTab === 'advanced'">
                         <div class="bg-white rounded-lg p-4 border">
                             <h4 class="text-sm font-bold text-gray-700 mb-3">自定义节点（JSON）</h4>
@@ -1875,14 +1803,22 @@
                                 checking: 0,
                             },
 
-                            searchQuery: '', searchResults: [], searchError: '', searching: false,
-                            searchSource: '', searchAttempts: [],
+                            netSpeed: {
+                                down_bps: 0,
+                                up_bps: 0,
+                                total_bps: 0,
+                                window: 5,
+                                samples: 0,
+                            },
+                            _netSpeedTimer: null,
+
                             nodeSearchQuery: '',
                             proxies: JSON.parse('{{ proxies | tojson | safe }}'),
                             stats: JSON.parse('{{ stats | tojson | safe }}'),
                             pullHistory: JSON.parse('{{ pull_history | tojson | safe }}'),
                             host: window.location.host,
                             showAddModal: false, showPullsModal: false, showHelpModal: false, showLogsModal: false, showConfigModal: false,
+
                             configForm: {
                                 app: { name: '', tagline: '' },
                                 server: { host: '0.0.0.0', port: 8000, debug: false },
@@ -1898,16 +1834,15 @@
                                     follow_redirect_fail_cooldown: 300, blob_fail_cooldown: 600,
                                     prefer_recent_success: true, recent_success_window: 120,
                                     affinity_window: 120, probe_node_window: 300,
-                                    low_speed_threshold: 524288,
-                                    low_speed_duration: 10.0,
-                                    warmup_seconds: 2.0,
+                                    low_speed_threshold: 131072,
+                                    low_speed_duration: 15.0,
+                                    warmup_seconds: 5.0,
                                 },
                                 access: { ip_whitelist: [], image_whitelist_regex: '', image_blacklist_regex: '' },
                                 auto_fetch: { enabled: true, interval_minutes: 1440, api_url: 'https://status.anye.xyz', registry_types: [], filters: { selectable: true, access: 'public' } },
                                 health_check: { interval_minutes: 60, timeout_seconds: 5.0, latency_threshold: 500, disable_threshold: 9999, concurrent_batch: 5, auto_recover: true, recover_after_minutes: 120 },
                                 speed_test: { enabled: true, interval_minutes: 720, duration_seconds: 5.0, tag: 'latest', concurrent_batch: 5, test_images_by_type: {} },
                                 logging: { level: 'INFO', file: 'data/docker-assistant.log', max_bytes: 10485760, backup_count: 5, third_party_level: 'WARNING' },
-                                search: { enabled: true, page_size: 25, timeout: 10.0, upstreams: [] },
                                 route_aliases: {}, custom_nodes: [], manually_disabled: [],
                                 updater: {
                                     enabled: true,
@@ -1930,20 +1865,17 @@
                                 route_aliases: '{}',
                                 custom_nodes: '[]',
                                 manually_disabled: '[]',
-                                search_upstreams: '[]',
                                 updater_mirrors: '["local"]',
                             },
                             configPath: '', configLoading: false, configSaving: false,
                             configStatus: '', configStatusType: '', configDirty: false,
-                            activeConfigTab: 'basic',
+                            activeConfigTab: 'general',
                             configTabs: [
-                                { key: 'basic', label: '基础', icon: 'fas fa-cog' },
-                                { key: 'proxy', label: '代理', icon: 'fas fa-exchange-alt' },
-                                { key: 'schedule', label: '调度', icon: 'fas fa-clock' },
-                                { key: 'updater', label: '容器更新', icon: 'fas fa-cubes' },
-                                { key: 'access', label: '访问/搜索', icon: 'fas fa-shield-alt' },
-                                { key: 'logging', label: '日志', icon: 'fas fa-file-alt' },
-                                { key: 'advanced', label: '高级', icon: 'fas fa-code' },
+                                { key: 'general', label: '通用', icon: 'fas fa-cog' },
+                                { key: 'mirror', label: '镜像加速', icon: 'fas fa-bolt' },
+                                { key: 'containers', label: '容器列表', icon: 'fas fa-cubes' },
+                                { key: 'logs', label: '运行日志', icon: 'fas fa-file-alt' },
+                                { key: 'advanced', label: '高级设置', icon: 'fas fa-sliders-h' },
                             ],
                             healthLogs: [], helpCommand: '', helpTitle: '', isEdit: false,
                             formNode: { id: null, name: '', url: '', registry_type: 'dockerhub', route_prefix: '', username: '', password: '' },
@@ -2053,6 +1985,7 @@
                             else setTimeout(kick, 500);
                         }
                         this.startPolling();
+                        this.startNetworkSpeedPolling();
                         setTimeout(() => { this.initialLoading = false; }, 800);
 
                         const urlParams = new URLSearchParams(location.search);
@@ -2061,12 +1994,43 @@
                             setTimeout(() => this.switchMainView(v), 0);
                         }
                     },
-                    beforeUnmount() { this.stopPolling(); },
+                    beforeUnmount() {
+                        this.stopPolling();
+                        if (this._netSpeedTimer) {
+                            clearInterval(this._netSpeedTimer);
+                            this._netSpeedTimer = null;
+                        }
+                    },
                     methods: {
                         switchMainView(name) {
                             this.currentMainView = name;
                             window.__currentMainView = name;
                             if (window.__updOnViewChange) window.__updOnViewChange(name);
+                        },
+
+                        startNetworkSpeedPolling() {
+                            this.pollNetworkSpeed();
+                            this._netSpeedTimer = setInterval(() => this.pollNetworkSpeed(), 2000);
+                        },
+                        async pollNetworkSpeed() {
+                            try {
+                                const res = await fetch('/api/network-speed', { cache: 'no-store' });
+                                if (!res.ok) return;
+                                const data = await res.json();
+                                this.netSpeed = {
+                                    down_bps: Number(data.down_bps) || 0,
+                                    up_bps: Number(data.up_bps) || 0,
+                                    total_bps: Number(data.total_bps) || 0,
+                                    window: Number(data.window) || 5,
+                                    samples: Number(data.samples) || 0,
+                                };
+                            } catch (e) { /* 静默 */ }
+                        },
+                        netSpeedText(bps) {
+                            if (!bps || bps <= 0) return '0 B/s';
+                            const k = 1024, sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+                            const i = Math.floor(Math.log(bps) / Math.log(k));
+                            return `${parseFloat((bps / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
                         },
 
                         pushNotification(msg, kind = 'ok', ms = null) {
@@ -2083,12 +2047,6 @@
                             }, durationMs);
                         },
 
-                        /**
-                         * 注入/更新一个本地任务（不会被后端 /api/tasks/status 覆盖）。
-                         * @param {string} key   任务唯一标识（以 local_ 开头）
-                         * @param {string} label 任务标题
-                         * @param {string} message 当前阶段
-                         */
                         upsertLocalTask(key, label, message = '处理中…') {
                             if (!key) return;
                             this.taskProgress[key] = {
@@ -2105,12 +2063,6 @@
                             };
                         },
 
-                        /**
-                         * 结束本地任务：更新显示，popupDuration 秒后自动移除。
-                         * @param {string} key
-                         * @param {string} message 完成信息
-                         * @param {boolean} ok    是否成功
-                         */
                         finishLocalTask(key, message, ok = true) {
                             const t = this.taskProgress[key];
                             if (!t) return;
@@ -2141,11 +2093,9 @@
                                 if (!res.ok) return;
                                 const data = await res.json();
 
-                                // ① 后端任务状态（用于"任务全部完成"判断）
                                 const hasRunningBackend = Object.values(data).some(v => v && v.running);
                                 const hadRunning = this._hadRunningTask === true;
 
-                                // ② 合并本地任务（_local: true），避免被整体覆盖
                                 const merged = { ...data };
                                 for (const k of Object.keys(this.taskProgress)) {
                                     const v = this.taskProgress[k];
@@ -2200,49 +2150,6 @@
                             }
                         },
 
-                        async search() {
-                            const q = (this.searchQuery || '').trim();
-                            if (!q) { this.searchError = '请输入搜索关键词'; return; }
-                            this.searching = true; this.searchError = ''; this.searchResults = [];
-                            this.searchSource = ''; this.searchAttempts = [];
-                            try {
-                                const ctrl = new AbortController();
-                                const timer = setTimeout(() => ctrl.abort(), 5000);
-                                const res = await fetch(`https://hub.docker.com/v2/search/repositories/?query=${encodeURIComponent(q)}&page_size=25`, { headers: { 'Accept': 'application/json' }, signal: ctrl.signal });
-                                clearTimeout(timer);
-                                if (res.ok) {
-                                    const data = await res.json();
-                                    this.searchResults = data.results || [];
-                                    this.searchSource = '浏览器直连';
-                                    if (this.searchResults.length === 0) this.searchError = '没有找到匹配的镜像';
-                                    this.searching = false;
-                                    return;
-                                }
-                            } catch (e) {}
-                            try {
-                                const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-                                if (!res.ok) { this.searchError = `后端搜索失败 (HTTP ${res.status})`; return; }
-                                const data = await res.json();
-                                if (data.error) { this.searchError = this._humanizeSearchError(data.error); this.searchAttempts = data.attempts || []; }
-                                else {
-                                    this.searchResults = data.results || [];
-                                    this.searchSource = data.source || '后端代理';
-                                    if (this.searchResults.length === 0) this.searchError = '没有找到匹配的镜像';
-                                }
-                            } catch (e) { this.searchError = `后端搜索异常: ${e.message}`; }
-                            finally { this.searching = false; }
-                        },
-                        _humanizeSearchError(err) {
-                            if (!err) return '搜索失败';
-                            if (err === 'timeout') return '搜索超时，Docker Hub 无响应，请稍后重试';
-                            if (err === 'connection failed') return '无法连接到上游搜索代理，请检查服务器外网连通性';
-                            if (err === 'empty query') return '请输入搜索关键词';
-                            if (err === 'search disabled') return '后端搜索已在配置中禁用';
-                            if (err === 'no upstream configured') return '浏览器无法访问 Docker Hub，且后端未配置搜索代理。';
-                            if (err === 'all upstreams failed') return '所有搜索代理均失败。';
-                            if (String(err).startsWith('upstream status')) return `Docker Hub 返回异常 (${err})`;
-                            return `搜索失败: ${err}`;
-                        },
                         sortBy(key) {
                             if (this.sortKey === key) this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
                             else { this.sortKey = key; this.sortOrder = key === 'speed' || key === 'download_bytes' ? 'desc' : 'asc'; }
@@ -2297,10 +2204,6 @@
                             };
                             reader.readAsText(file);
                             event.target.value = '';
-                        },
-                        copyCommand(img) {
-                            const name = img.repo_name.includes('/') ? img.repo_name : `library/${img.repo_name}`;
-                            this.copyToClipboard(`docker pull ${this.host}/${name}`);
                         },
                         copyHelpCommand() { this.copyToClipboard(this.helpCommand); },
                         copyToClipboard(text) {
@@ -2428,7 +2331,7 @@
                         },
                         async openConfigModal() {
                             this.showConfigModal = true;
-                            this.activeConfigTab = 'basic';
+                            this.activeConfigTab = 'general';
                             this.configStatus = ''; this.configStatusType = ''; this.configDirty = false;
                             await this.loadConfig();
                         },
@@ -2470,7 +2373,6 @@
                                 this.configJsonStrings.route_aliases = JSON.stringify(this.configForm.route_aliases || {}, null, 2);
                                 this.configJsonStrings.custom_nodes = JSON.stringify(this.configForm.custom_nodes || [], null, 2);
                                 this.configJsonStrings.manually_disabled = JSON.stringify(this.configForm.manually_disabled || [], null, 2);
-                                this.configJsonStrings.search_upstreams = JSON.stringify((this.configForm.search || {}).upstreams || [], null, 2);
                                 this.configJsonStrings.updater_mirrors = JSON.stringify((this.configForm.updater || {}).mirrors || ['local'], null, 2);
                                 const pd = Number((this.configForm.updater || {}).progress_popup_duration);
                                 if (!isNaN(pd) && pd > 0) this.popupDuration = pd;
@@ -2491,7 +2393,6 @@
                                 { key: 'route_aliases', path: ['route_aliases'] },
                                 { key: 'custom_nodes', path: ['custom_nodes'] },
                                 { key: 'manually_disabled', path: ['manually_disabled'] },
-                                { key: 'search_upstreams', path: ['search', 'upstreams'] },
                                 { key: 'updater_mirrors', path: ['updater', 'mirrors'] },
                             ];
                             for (const f of jsonFields) {
@@ -2505,6 +2406,9 @@
                                     return;
                                 }
                             }
+                            // 移除历史遗留的 search 段
+                            delete this.configForm.search;
+
                             this.configSaving = true; this.configStatusType = 'info'; this.configStatus = '正在保存并重载…';
                             try {
                                 const res = await fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: this.configForm }) });
@@ -2570,7 +2474,6 @@
         }
         window.__updToast = toast;
 
-        // 状态浮窗：本地任务辅助
         function startLocalTask(key, label, message) {
             if (window.__vueApp && typeof window.__vueApp.upsertLocalTask === "function") {
                 window.__vueApp.upsertLocalTask(key, label, message);
@@ -3187,9 +3090,6 @@
             } catch (e) { toast(`删除失败：${e.message}`, "err", 8000); }
         }
 
-        // ============================================================
-        //  清理悬空镜像 —— 进度显示在状态浮窗
-        // ============================================================
         async function pruneImages() {
             if (!confirm("确认清理所有悬空镜像（<none>:<none>）？\n仅删除无标签镜像，不影响正在运行的容器。")) return;
             const TASK_KEY = "local_prune_dangling";
@@ -3214,9 +3114,6 @@
             }
         }
 
-        // ============================================================
-        //  清理未使用镜像 —— 进度显示在状态浮窗
-        // ============================================================
         async function pruneUnusedImages() {
             const unusedCount = (updState.images || []).filter(i => !i.dangling && (i.containers || 0) === 0).length;
             const extra = unusedCount > 0 ? `\n将删除 ${unusedCount} 个镜像。` : "";

@@ -19,7 +19,6 @@ from app.core import log_handler
 from app.db import HealthCheckLog, ProxyNode, engine
 from app.docker_service import docker_service
 from app import proxy_manager, updater_service
-from app.registry import search_docker_hub
 from app import traffic as traffic_logger
 
 security = HTTPBasic(auto_error=False)
@@ -61,19 +60,17 @@ async def index(request: Request):
     pull_history = traffic_logger.get_pull_history(limit=200)
     total_download = sum(s.download_bytes for s in stats)
 
-    # 状态浮窗展示时长（秒）：供首屏注入到前端
     popup_duration = getattr(config.updater, "progress_popup_duration", 3) or 3
 
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            # 统一从 APP_INFO 取值
             "app_name": APP_INFO["name"],
             "app_tagline": APP_INFO["tagline"],
             "app_version": APP_INFO["version"],
-            "start_year": APP_INFO["start_year"],  # 【新增】供 footer 使用
-            "repo": APP_INFO["repo"],  # 【新增】供 footer 链接使用
+            "start_year": APP_INFO["start_year"],
+            "repo": APP_INFO["repo"],
             "current_year": datetime.now().year,
             "proxies": [p.model_dump(mode="json") for p in proxies],
             "stats": [s.model_dump(mode="json") for s in stats],
@@ -332,16 +329,13 @@ async def tasks_status():
 
 
 # ============================================================
-#  镜像搜索
+#  网络速率（供顶栏实时展示）
 # ============================================================
 
 
-@router.get("/api/search")
-async def search_images(q: str, page_size: int = None):
-    if page_size is None:
-        page_size = config.search.page_size
-    result = await search_docker_hub(q, page_size)
-    return JSONResponse(content=result)
+@router.get("/api/network-speed")
+async def network_speed():
+    return traffic_logger.get_network_speed()
 
 
 # ============================================================
@@ -365,6 +359,7 @@ async def get_config():
         raise HTTPException(500, f"解析配置失败: {e}")
 
     data["app"] = get_app_config_dict()
+    data.pop("search", None)
 
     return {
         "yaml": text,
@@ -390,8 +385,8 @@ async def update_config(request: Request):
     except Exception as e:
         raise HTTPException(400, f"请求体不是合法 JSON: {e}")
 
-    yaml_text: str | None = None
-    parsed: dict | None = None
+    yaml_text = None
+    parsed = None
 
     if isinstance(body.get("config"), dict):
         parsed = body["config"]
@@ -407,6 +402,7 @@ async def update_config(request: Request):
         raise HTTPException(400, "配置根节点必须是字典（mapping）")
 
     parsed["app"] = get_app_config_dict()
+    parsed.pop("search", None)
 
     try:
         AppConfig(**parsed)
@@ -479,23 +475,17 @@ async def download_backup():
 
 
 # ============================================================
-#  容器更新 API（原 updater.py）
+#  容器更新 API
 # ============================================================
 
 
 @router.get("/api/updater/meta")
 async def api_meta():
-    """返回应用元信息（含起始年份、仓库、许可证）。"""
     return {**APP_INFO, "current_year": datetime.now().year}
 
 
 @router.get("/api/updater/changelog")
 async def api_changelog(limit: int = 0):
-    """返回版本变更历史。
-
-    - limit <= 0：返回全部
-    - limit > 0：只返回最近 limit 个版本
-    """
     return {"changelog": get_changelog(limit)}
 
 
@@ -591,7 +581,6 @@ async def api_update(name: str):
 
 @router.post("/api/updater/update/{name}/cancel")
 async def api_cancel_update(name: str):
-    """请求取消正在进行的容器更新。"""
     accepted = updater_service.request_cancel(name)
     if not accepted:
         raise HTTPException(status_code=404, detail=f"{name} 当前没有正在进行的更新")
@@ -622,7 +611,6 @@ async def api_put_policy(name: str, payload: ContainerPolicyPayload):
 
 @router.get("/api/updater/images")
 async def api_images():
-    """列出本地镜像（剥离代理前缀标签后再返回）。"""
     loop = asyncio.get_running_loop()
     prefixes = updater_service.get_local_mirror_prefixes()
     return await loop.run_in_executor(
@@ -648,7 +636,6 @@ async def api_remove_image(
 
 @router.post("/api/updater/images/prune")
 async def api_prune_images():
-    """清理悬空镜像（<none>:<none>）。"""
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, docker_service.prune_images)
@@ -658,7 +645,6 @@ async def api_prune_images():
 
 @router.post("/api/updater/images/prune-unused")
 async def api_prune_unused_images():
-    """清理未使用镜像（有 tag 但无任何容器引用）。"""
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, docker_service.prune_unused_images)
@@ -668,7 +654,6 @@ async def api_prune_unused_images():
 
 @router.post("/api/updater/images/cleanup-mirror-tags")
 async def api_cleanup_mirror_tags():
-    """清理所有镜像上形如 "127.0.0.1:8000/xxx" 的代理前缀标签。"""
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, updater_service.cleanup_mirror_tags)

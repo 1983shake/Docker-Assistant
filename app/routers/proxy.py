@@ -31,9 +31,6 @@ _TOKEN_TTL = 240
 _MAX_TOKEN_CACHE = 200
 
 
-# ============================================================
-#  超时构造
-# ============================================================
 def _get_timeout(path: str) -> httpx.Timeout:
     tbp = config.proxy.timeout_by_path
 
@@ -56,6 +53,30 @@ def _get_timeout(path: str) -> httpx.Timeout:
         )
 
     return httpx.Timeout(config.proxy.timeout)
+
+
+def _get_header_ci(headers: dict, name: str) -> Optional[str]:
+    name_lower = name.lower()
+    for k, v in headers.items():
+        if k.lower() == name_lower:
+            return v
+    return None
+
+
+def _set_header_ci(headers: dict, name: str, value: str) -> None:
+    name_lower = name.lower()
+    for k in list(headers.keys()):
+        if k.lower() == name_lower:
+            headers[k] = value
+            return
+    headers[name] = value
+
+
+def _pop_header_ci(headers: dict, name: str) -> None:
+    name_lower = name.lower()
+    for k in list(headers.keys()):
+        if k.lower() == name_lower:
+            headers.pop(k, None)
 
 
 async def parse_www_authenticate(header: str) -> dict:
@@ -112,6 +133,10 @@ async def get_upstream_token(
         return None
 
 
+def _strip_authorization(headers) -> list:
+    return [(k, v) for k, v in headers if (k or "").lower() != "authorization"]
+
+
 async def _send_with_auth(
     client: httpx.AsyncClient,
     method: str,
@@ -142,7 +167,7 @@ async def _send_with_auth(
                 node.password,
             )
             if token:
-                retry_headers = list(headers_list)
+                retry_headers = _strip_authorization(headers_list)
                 retry_headers.append(("Authorization", f"Bearer {token}"))
                 req = client.build_request(method, url, headers=retry_headers, content=content)
                 return await client.send(req, stream=True)
@@ -152,7 +177,7 @@ async def _send_with_auth(
     elif "Basic" in auth_header_val and node.username and node.password:
         await r.aclose()
         b64_auth = base64.b64encode(f"{node.username}:{node.password}".encode()).decode()
-        retry_headers = list(headers_list)
+        retry_headers = _strip_authorization(headers_list)
         retry_headers.append(("Authorization", f"Basic {b64_auth}"))
         req = client.build_request(method, url, headers=retry_headers, content=content)
         return await client.send(req, stream=True)
@@ -192,8 +217,7 @@ async def _try_follow_redirects(
         redirect_headers = [(k, v) for k, v in headers_list if k.lower() not in ("host", "authorization", "content-length")]
 
         try:
-            redirect_req = client.build_request(new_method, location, headers=redirect_headers, content=new_content)
-            r = await client.send(redirect_req, stream=True)
+            r = await _send_with_auth(client, new_method, location, redirect_headers, new_content, proxy_node)
 
             if new_content:
                 traffic_logger.log_traffic(
@@ -226,37 +250,11 @@ def _extract_image_name(path: str) -> str | None:
     return None
 
 
-# ============================================================
-#  预热探测：blob 响应进入正式转发前，先下载一段数据测速
-#
-#  【v1.1.1 修复】
-#  httpx 的响应流只能被消费一次。原实现中：
-#    - 预热阶段：response.aiter_bytes() 第一次消费
-#    - 转发阶段：r.aiter_bytes() 第二次消费
-#  第二次会抛 StreamConsumed，导致每个 blob 在"选到快节点"
-#  后立刻断流，Docker daemon 拉取失败。
-#
-#  修复策略：预热函数创建的 aiter 直接返回给调用方，
-#  由 iter_response 复用之，全程只消费一次。
-# ============================================================
 async def _warmup_check_blob(
     response: httpx.Response,
     warmup_seconds: float,
     threshold_bps: int,
 ) -> tuple[bool, bytes, float, "AsyncIterator[bytes]"]:
-    """
-    预热探测 blob 流。
-
-    从上游响应中读取 warmup_seconds 秒的数据到内存，测量平均下载速度。
-
-    返回 (ok, buffered_bytes, speed_bps, aiter)：
-      - ok:             是否达标（若数据提前下完，视为达标）
-      - buffered_bytes: 已下载数据（必须交给 iter_response 继续发送）
-      - speed_bps:      平均速度（字节/秒）
-      - aiter:          与 response 绑定的异步迭代器，
-                        调用方【必须】复用它继续读取剩余数据，
-                        否则 httpx 会因重复消费抛出 StreamConsumed。
-    """
     chunks: list[bytes] = []
     total = 0
     start = time.time()
@@ -292,9 +290,6 @@ async def _warmup_check_blob(
     return ok, b"".join(chunks), speed, aiter
 
 
-# ============================================================
-#  核心代理逻辑
-# ============================================================
 async def proxy_v2(path: str, request: Request) -> Response:
     """核心代理逻辑：按速度排序依次尝试所有节点，全失败则停止。"""
     client_ip = request.client.host if request.client else "unknown"
@@ -312,18 +307,18 @@ async def proxy_v2(path: str, request: Request) -> Response:
         )
 
     if path and ("/manifests/" in path or "/blobs/" in path):
-        image_name = path.split("/manifests/")[0] if "/manifests/" in path else path.split("/blobs/")[0]
+        image_name_check = path.split("/manifests/")[0] if "/manifests/" in path else path.split("/blobs/")[0]
 
-        if config.access.image_blacklist_regex and re.search(config.access.image_blacklist_regex, image_name):
-            logger.warning(f"镜像 {image_name} 被黑名单拒绝")
+        if config.access.image_blacklist_regex and re.search(config.access.image_blacklist_regex, image_name_check):
+            logger.warning(f"镜像 {image_name_check} 被黑名单拒绝")
             return Response(
                 content='{"errors":[{"code":"UNAUTHORIZED","message":"Image blacklisted"}]}',
                 status_code=403,
                 media_type="application/json",
             )
 
-        if config.access.image_whitelist_regex and not re.search(config.access.image_whitelist_regex, image_name):
-            logger.warning(f"镜像 {image_name} 被白名单拒绝")
+        if config.access.image_whitelist_regex and not re.search(config.access.image_whitelist_regex, image_name_check):
+            logger.warning(f"镜像 {image_name_check} 被白名单拒绝")
             return Response(
                 content='{"errors":[{"code":"UNAUTHORIZED","message":"Image not in whitelist"}]}',
                 status_code=403,
@@ -337,6 +332,9 @@ async def proxy_v2(path: str, request: Request) -> Response:
     _is_manifest_request = bool(path and "/manifests/" in path)
     _is_blob_request = bool(path and "/blobs/" in path)
     _is_tag_manifest = bool(_is_manifest_request and image_name and image_tag and not image_tag.startswith("sha256:"))
+
+    # 【新增】只有 GET 才算"拉取"，HEAD 只是探测
+    _is_real_pull = _is_tag_manifest and request.method.upper() == "GET"
 
     _retryable_codes = MANIFEST_RETRYABLE_STATUS_CODES if _is_manifest_request else RETRYABLE_STATUS_CODES
 
@@ -429,6 +427,21 @@ async def proxy_v2(path: str, request: Request) -> Response:
             r = None
             continue
 
+        if r.status_code == 401 and _is_blob_request:
+            reason = "HTTP 401 (blob auth failed)"
+            logger.warning(f"节点 {node.name} 返回 {reason}，切换下一个候选")
+            attempts_log.append(f"{node.name}:HTTP 401")
+            try:
+                await r.aclose()
+            except Exception:
+                pass
+            if node.id is not None:
+                proxy_manager.mark_node_failed(node.id, reason, cooldown=600)
+                proxy_manager.mark_blob_failed(node.id, path)
+            last_error = reason
+            r = None
+            continue
+
         if r.status_code in _retryable_codes:
             reason = f"HTTP {r.status_code}"
             logger.warning(f"节点 {node.name} 返回 {reason}，尝试下一个候选")
@@ -463,6 +476,21 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 continue
             r = new_r
 
+            if r.status_code == 401 and _is_blob_request:
+                reason = "HTTP 401 (blob auth failed, after redirect)"
+                logger.warning(f"节点 {node.name} 重定向后返回 {reason}，切换下一个候选")
+                attempts_log.append(f"{node.name}:HTTP 401")
+                try:
+                    await r.aclose()
+                except Exception:
+                    pass
+                if node.id is not None:
+                    proxy_manager.mark_node_failed(node.id, reason, cooldown=600)
+                    proxy_manager.mark_blob_failed(node.id, path)
+                last_error = reason
+                r = None
+                continue
+
         # ============================================================
         #  blob 预热测速
         # ============================================================
@@ -486,11 +514,6 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 except Exception:
                     pass
                 if node.id is not None:
-                    proxy_manager.mark_node_failed(
-                        node.id,
-                        "warmup-low-speed",
-                        cooldown=config.proxy.fail_cooldown,
-                    )
                     proxy_manager.mark_blob_failed(node.id, path)
                 r = None
                 continue
@@ -517,6 +540,20 @@ async def proxy_v2(path: str, request: Request) -> Response:
         await client.aclose()
         summary = " | ".join(attempts_log) if attempts_log else (last_error or "unknown")
         logger.error(f"所有候选节点均失败: {summary}")
+
+        # 【修复】只有 GET tag manifest 才算一次真正的拉取；HEAD 只是探测，不记录
+        if _is_real_pull and image_name and image_tag:
+            real_ip_fail = request.headers.get("x-forwarded-for", client_ip)
+            try:
+                traffic_logger.log_pull(
+                    image=image_name,
+                    tag=image_tag,
+                    client_ip=real_ip_fail,
+                    status="failed",
+                    error_message=f"所有候选节点失败: {summary}",
+                )
+            except Exception as e:
+                logger.error(f"记录拉取失败失败: {e}")
 
         if _is_manifest_request and attempts_log and all(":HTTP 404" in a for a in attempts_log):
             return Response(
@@ -548,7 +585,7 @@ async def proxy_v2(path: str, request: Request) -> Response:
     # ===== 响应头 =====
     resp_headers = dict(r.headers)
 
-    auth_header = resp_headers.get("www-authenticate")
+    auth_header = _get_header_ci(resp_headers, "www-authenticate")
     if auth_header:
         my_host = f"{request.url.scheme}://{request.url.netloc}"
         realm_match = re.search(r'realm="([^"]+)"', auth_header)
@@ -556,17 +593,18 @@ async def proxy_v2(path: str, request: Request) -> Response:
             upstream_realm = realm_match.group(1)
             b64_realm = base64.urlsafe_b64encode(upstream_realm.encode()).decode()
             new_realm = f"{my_host}/token?_upstream_realm={quote(b64_realm)}"
-            resp_headers["www-authenticate"] = auth_header.replace(upstream_realm, new_realm)
+            _set_header_ci(resp_headers, "www-authenticate", auth_header.replace(upstream_realm, new_realm))
 
     if request.method != "HEAD":
-        resp_headers.pop("content-length", None)
-    resp_headers.pop("content-encoding", None)
+        _pop_header_ci(resp_headers, "content-length")
+    _pop_header_ci(resp_headers, "content-encoding")
 
     if r.status_code not in REDIRECT_STATUS_CODES:
-        resp_headers.pop("location", None)
+        _pop_header_ci(resp_headers, "location")
 
     real_client_ip = request.headers.get("x-forwarded-for", client_ip)
     _node_id = proxy_node.id
+    _node_name = proxy_node.name
 
     _first_byte_to = config.proxy.blob_first_byte_timeout
     if _first_byte_to is not None and _first_byte_to <= 0:
@@ -578,6 +616,9 @@ async def proxy_v2(path: str, request: Request) -> Response:
         total_downloaded = 0
         recorded = False
         first_chunk = True
+
+        _err_status: Optional[str] = None
+        _err_message: Optional[str] = None
 
         speed_samples: list[tuple[float, int]] = []
 
@@ -655,6 +696,8 @@ async def proxy_v2(path: str, request: Request) -> Response:
                         )
                         if _is_blob_request:
                             proxy_manager.mark_blob_failed(_node_id, path)
+                    _err_status = "failed"
+                    _err_message = f"首字节超时（{_first_byte_to}s）"
                     _record()
                     return
 
@@ -676,28 +719,51 @@ async def proxy_v2(path: str, request: Request) -> Response:
                             cooldown=config.proxy.fail_cooldown,
                         )
                         proxy_manager.mark_blob_failed(_node_id, path)
+                    _err_status = "failed"
+                    _err_message = f"持续低速中断（已下载 {total_downloaded/1024/1024:.2f} MB）"
                     _record()
                     return
 
                 yield chunk
 
         except asyncio.CancelledError:
+            _err_status = "cancelled"
+            _err_message = "客户端断开连接"
             _record()
             raise
         except httpx.ReadTimeout as e:
+            _err_status = "failed"
+            _err_message = f"流式读取超时: {e}"
             logger.warning(f"流式读取超时（{_path_type}）：已下载 {total_downloaded} 字节，" f"read_timeout={timeout.read}。原始错误: {e}")
             _record()
             return
         except httpx.RemoteProtocolError as e:
+            _err_status = "failed"
+            _err_message = f"上游提前断开: {e}"
             logger.warning(f"上游提前断开连接（{_path_type}）：已下载 {total_downloaded} 字节: {e}")
             _record()
             return
         except Exception as e:
+            _err_status = "failed"
+            _err_message = f"{type(e).__name__}: {e}"
             logger.error(f"流式传输异常（{_path_type}）: {type(e).__name__}: {e}")
             _record()
             return
         finally:
             _record()
+            if _err_status and _is_blob_request and track_image:
+                try:
+                    traffic_logger.log_pull(
+                        image=track_image,
+                        tag="",
+                        client_ip=real_client_ip,
+                        node_id=_node_id,
+                        node_name=_node_name,
+                        status=_err_status,
+                        error_message=_err_message,
+                    )
+                except Exception as e:
+                    logger.error(f"记录拉取异常状态失败: {e}")
             try:
                 await r.aclose()
             except Exception:

@@ -45,10 +45,9 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
         "recent_success_window": 120,
         "affinity_window": 120,
         "probe_node_window": 300,
-        # 【新增】低速切换
-        "low_speed_threshold": 524288,  # 低速阈值（字节/秒），默认 512 KB/s
-        "low_speed_duration": 10.0,  # 低速持续时间（秒）
-        "warmup_seconds": 2.0,  # 预热探测时长（秒），0 表示不预热
+        "low_speed_threshold": 131072,
+        "low_speed_duration": 15.0,
+        "warmup_seconds": 5.0,
     },
     "access": {
         "ip_whitelist": [],
@@ -97,12 +96,6 @@ DEFAULT_CONFIG_DICT: dict[str, Any] = {
     "manually_disabled": [],
     "custom_nodes": [],
     "route_aliases": {},
-    "search": {
-        "enabled": True,
-        "page_size": 25,
-        "timeout": 10.0,
-        "upstreams": [],
-    },
     "updater": {
         "enabled": True,
         "check_interval_minutes": 60,
@@ -136,7 +129,7 @@ _CONFIG_FILE_HEADER = f"""\
 #  ────────────────────────────────────────────────────────────
 #    立即生效（Web 保存后自动重载）：
 #      admin.*、proxy.*、access.*、custom_nodes、manually_disabled、
-#      route_aliases、search.*、speed_test.*、updater.*（除 interval）
+#      route_aliases、speed_test.*、updater.*（除 interval）
 #
 #    需要重启服务：
 #      server.*、logging.*
@@ -212,11 +205,9 @@ class ProxyConfig(BaseModel):
     recent_success_window: int = 120
     affinity_window: int = 120
     probe_node_window: int = 300
-
-    # 【新增】低速切换
-    low_speed_threshold: int = 524288  # 字节/秒，默认 512 KB/s
-    low_speed_duration: float = 10.0  # 秒
-    warmup_seconds: float = 2.0  # 秒，0 表示不预热
+    low_speed_threshold: int = 131072
+    low_speed_duration: float = 15.0
+    warmup_seconds: float = 5.0
 
 
 class AccessConfig(BaseModel):
@@ -307,23 +298,6 @@ class ManuallyDisabledNode(BaseModel):
     disabled_at: str = ""
 
 
-class SearchUpstream(BaseModel):
-    name: str
-    url: str
-
-
-class SearchConfig(BaseModel):
-    enabled: bool = True
-    page_size: int = 25
-    timeout: float = 10.0
-    upstreams: list[SearchUpstream] = []
-
-    @field_validator("upstreams", mode="before")
-    @classmethod
-    def _none_to_list(cls, v):
-        return v or []
-
-
 class UpdaterConfig(BaseModel):
     enabled: bool = True
     check_interval_minutes: int = 60
@@ -368,7 +342,6 @@ class AppConfig(BaseModel):
     custom_nodes: list[CustomNode] = []
     manually_disabled: list[ManuallyDisabledNode] = []
     route_aliases: dict[str, list[str]] = {}
-    search: SearchConfig = SearchConfig()
     updater: UpdaterConfig = UpdaterConfig()
 
     @field_validator("custom_nodes", "manually_disabled", mode="before")
@@ -405,13 +378,13 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     data["app"] = get_app_config_dict()
+    # 清理历史遗留字段（老版本 config.yaml 可能还有 search 段）
+    data.pop("search", None)
     for key in ("custom_nodes", "manually_disabled"):
         if data.get(key) is None:
             data[key] = []
     if data.get("route_aliases") is None:
         data["route_aliases"] = {}
-    if data.get("search") is None:
-        data["search"] = {}
     if data.get("speed_test") is None:
         data["speed_test"] = {}
     if data.get("updater") is None:

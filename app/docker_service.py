@@ -97,12 +97,23 @@ class DockerService:
     ) -> Tuple[str, str]:
         """拉取镜像，返回 (最终使用的镜像引用, 源标签)。
 
-        【v1.1.1 修复】
-          1. 按 layer 聚合，向 on_progress 上报累计字节（用于进度条）。
-          2. 走加速源拉取时，Docker 会自动为镜像打上
-             "<mirror>/<image_ref>" 的前缀 tag。拉取成功后，
-             本函数**立即取消该前缀 tag**，只保留 image_ref，
-             避免镜像列表里出现 "127.0.0.1:8000/xxx:latest" 这类内部地址。
+        通过 on_progress 上报的事件结构：
+          {
+            "phase": "preparing" | "downloading" | "extracting" | "ready",
+            "status": <原始 Docker 状态字符串>,
+            "layer_id": <当前事件关联的层 id，或 None>,
+            "current": <已下载字节（累计，仅 downloading 阶段有意义）>,
+            "total":   <总下载字节（累计）>,
+            "layers_total": <当前已知的层总数>,
+            "layers_downloaded": <已下载完成的层数>,
+            "layers_extracted":  <已解压完成的层数>,
+          }
+
+        阶段判定：
+          - preparing  : 还没有任何层被识别（manifest 阶段）
+          - downloading: 有层还没下载完成（Download complete / Pull complete / Already exists）
+          - extracting : 所有层都下载完成，但还有层未解压完成（Pull complete / Already exists）
+          - ready      : 全部层已完成
         """
         candidates: List[Tuple[str, str]] = []
         if is_dockerhub(image_ref):
@@ -126,9 +137,8 @@ class DockerService:
             if should_cancel and should_cancel():
                 raise PullCancelled()
 
-            # 按 layer 聚合：{layer_id: {"current": int, "total": int, "done": bool}}
+            # 按 layer 聚合：{layer_id: {"current", "total", "downloaded", "extracted"}}
             layers: Dict[str, Dict[str, Any]] = {}
-            last_total_reported = 0
 
             try:
                 logger.info("从 %s 拉取 %s", label, src)
@@ -151,77 +161,105 @@ class DockerService:
                     cur = detail.get("current")
                     tot = detail.get("total")
 
-                    if lid and isinstance(cur, int) and isinstance(tot, int) and tot > 0:
-                        entry = layers.setdefault(lid, {"current": 0, "total": tot, "done": False})
-                        entry["total"] = tot
-                        if cur > entry["current"]:
-                            entry["current"] = cur
-                    elif lid and status in ("Download complete", "Pull complete"):
-                        entry = layers.setdefault(lid, {"current": 0, "total": 0, "done": False})
-                        entry["done"] = True
-                        if entry["total"] > 0:
-                            entry["current"] = entry["total"]
-                    elif lid and status == "Already exists":
-                        entry = layers.setdefault(lid, {"current": 0, "total": 0, "done": True})
+                    # ---------- 更新层状态 ----------
+                    if lid:
+                        entry = layers.setdefault(
+                            lid,
+                            {"current": 0, "total": 0, "downloaded": False, "extracted": False},
+                        )
+
+                        if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
+                            entry["total"] = tot
+                            if cur > entry["current"]:
+                                entry["current"] = cur
+
+                        if status == "Download complete":
+                            entry["downloaded"] = True
+                            if entry["total"] > 0:
+                                entry["current"] = entry["total"]
+                        elif status == "Pull complete":
+                            entry["downloaded"] = True
+                            entry["extracted"] = True
+                            if entry["total"] > 0:
+                                entry["current"] = entry["total"]
+                        elif status == "Already exists":
+                            entry["downloaded"] = True
+                            entry["extracted"] = True
 
                     if on_progress is None:
                         continue
 
-                    if layers:
-                        total_b = 0
-                        cur_b = 0
-                        done_cnt = 0
-                        for v in layers.values():
-                            t = int(v.get("total") or 0)
-                            c = int(v.get("current") or 0)
-                            if t <= 0:
-                                continue
+                    # ---------- 汇总 ----------
+                    total_b = 0
+                    cur_b = 0
+                    layers_total = len(layers)
+                    downloaded_cnt = 0
+                    extracted_cnt = 0
+                    for v in layers.values():
+                        t = int(v.get("total") or 0)
+                        c = int(v.get("current") or 0)
+                        if t > 0:
                             total_b += t
-                            if v.get("done"):
-                                cur_b += t
-                                done_cnt += 1
-                            else:
-                                cur_b += min(c, t)
-                        if total_b > 0:
-                            last_total_reported = total_b
-                            try:
-                                on_progress(
-                                    {
-                                        "phase": "downloading",
-                                        "current": cur_b,
-                                        "total": total_b,
-                                        "layers_total": sum(1 for v in layers.values() if int(v.get("total") or 0) > 0),
-                                        "layers_done": done_cnt,
-                                        "status": status,
-                                        "layer_id": lid,
-                                    }
-                                )
-                            except Exception:
-                                pass
-                    elif status:
-                        try:
-                            on_progress({"phase": "status", "status": status})
-                        except Exception:
-                            pass
+                            cur_b += min(c, t)
+                        if v.get("downloaded"):
+                            downloaded_cnt += 1
+                        if v.get("extracted"):
+                            extracted_cnt += 1
 
-                if on_progress and last_total_reported > 0:
+                    # ---------- 判断阶段 ----------
+                    if layers_total == 0:
+                        phase = "preparing"
+                    elif downloaded_cnt < layers_total:
+                        phase = "downloading"
+                    elif extracted_cnt < layers_total:
+                        phase = "extracting"
+                    else:
+                        phase = "ready"
+
                     try:
                         on_progress(
                             {
-                                "phase": "downloading",
-                                "current": last_total_reported,
-                                "total": last_total_reported,
-                                "layers_total": len(layers),
-                                "layers_done": len(layers),
+                                "phase": phase,
+                                "status": status,
+                                "layer_id": lid,
+                                "current": cur_b,
+                                "total": total_b,
+                                "layers_total": layers_total,
+                                "layers_downloaded": downloaded_cnt,
+                                "layers_extracted": extracted_cnt,
+                            }
+                        )
+                    except Exception:
+                        pass
+
+                # ---------- 拉取收尾上报 ----------
+                if on_progress:
+                    total_b = 0
+                    cur_b = 0
+                    for v in layers.values():
+                        t = int(v.get("total") or 0)
+                        c = int(v.get("current") or 0)
+                        if t > 0:
+                            total_b += t
+                            cur_b += min(c, t)
+                    try:
+                        on_progress(
+                            {
+                                "phase": "ready",
                                 "status": "Pull complete",
                                 "layer_id": None,
+                                "current": cur_b,
+                                "total": total_b,
+                                "layers_total": len(layers),
+                                "layers_downloaded": len(layers),
+                                "layers_extracted": len(layers),
                             }
                         )
                     except Exception:
                         pass
 
                 # ========================================================
-                #  【v1.1.1 关键修复】清理代理前缀 tag
+                #  清理代理前缀 tag（v1.1.1 引入）
                 # ========================================================
                 if src != image_ref:
                     try:
@@ -572,11 +610,7 @@ class DockerService:
         self,
         mirror_prefixes: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """列出本地镜像，每个镜像一条记录。
-
-        【v1.1.1 增强】mirror_prefixes 提供时，会把每个 tag 上的代理前缀剥离。
-        剥离仅影响展示层，不修改 Docker 存储（存储层由 pull_image 清理）。
-        """
+        """列出本地镜像，每个镜像一条记录。"""
         counts = self._image_reference_counts()
         prefixes = [p.strip().rstrip("/") for p in (mirror_prefixes or []) if p and p.strip()]
 

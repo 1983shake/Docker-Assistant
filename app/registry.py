@@ -1,4 +1,4 @@
-"""Registry v2 客户端（查询远程 digest）+ Docker Hub 搜索。"""
+"""Registry v2 客户端（查询远程 digest）。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,8 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import httpx
 import requests
 
 from app.config import config
@@ -237,18 +236,7 @@ def get_remote_digests_multi(
     password: Optional[str] = None,
     use_direct: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """依次尝试所有镜像源，再直连。返回 (digest, source)。
-
-    【修复】原先只有 Docker Hub 镜像才会尝试 mirrors，导致 GHCR / GCR /
-    Quay / MCR / NVCR / Elastic 等 registry 的检测被强制直连（在国内
-    网络环境下必然超时），与 updater_service._resolve_check_source() 声明
-    的策略（"已知 registry 走节点路由"）相悖。
-
-    现在统一对所有 registry 生效：
-      1) 先按顺序尝试所有配置的镜像源（含内置 "local" → 本机代理）
-      2) 全部失败（或 mirrors 为空）后，若 use_direct=True 再直连上游
-    """
-    # ---- 1) 尝试所有镜像源（Docker Hub / GHCR / GCR / Quay / ... 通用）----
+    """依次尝试所有镜像源，再直连。返回 (digest, source)。"""
     for m in mirrors or []:
         m = (m or "").strip()
         if not m:
@@ -258,7 +246,6 @@ def get_remote_digests_multi(
         if d:
             return d, key
 
-    # ---- 2) 直连回退 ----
     if use_direct:
         key = parse_image_reference(image_ref)[0]
         d = _probe_source(key, image_ref, None, username, password)
@@ -266,51 +253,3 @@ def get_remote_digests_multi(
             return d, key
 
     return None, None
-
-
-# ============================================================
-#  Docker Hub 搜索
-# ============================================================
-
-
-async def search_docker_hub(q: str, page_size: int = 25) -> dict[str, Any]:
-    q = (q or "").strip()
-    if not q:
-        return {"results": [], "error": "empty query"}
-    if not config.search.enabled:
-        return {"results": [], "error": "search disabled"}
-    if not config.search.upstreams:
-        return {"results": [], "error": "no upstream configured"}
-
-    attempts: list[dict[str, str]] = []
-    async with httpx.AsyncClient(
-        timeout=config.search.timeout,
-        headers={
-            "User-Agent": "Docker-Assistant/1.0",
-            "Accept": "application/json",
-        },
-        follow_redirects=True,
-    ) as client:
-        for upstream in config.search.upstreams:
-            try:
-                logger.info(f"[search] 尝试上游: {upstream.name} -> {upstream.url}")
-                resp = await client.get(upstream.url, params={"query": q, "page_size": page_size})
-                if resp.status_code != 200:
-                    attempts.append({"name": upstream.name, "error": f"HTTP {resp.status_code}"})
-                    continue
-                try:
-                    data = resp.json()
-                except Exception as e:
-                    attempts.append({"name": upstream.name, "error": f"invalid json: {e}"})
-                    continue
-                results = data.get("results") or data.get("data") or data.get("repositories") or []
-                logger.info(f"[search] {upstream.name} 返回 {len(results)} 条")
-                return {"results": results, "source": upstream.name, "count": len(results)}
-            except httpx.TimeoutException:
-                attempts.append({"name": upstream.name, "error": "timeout"})
-            except httpx.ConnectError as e:
-                attempts.append({"name": upstream.name, "error": f"connect failed: {e}"})
-            except Exception as e:
-                attempts.append({"name": upstream.name, "error": str(e)})
-
-    return {"results": [], "error": "all upstreams failed", "attempts": attempts}
