@@ -50,63 +50,25 @@ Docker-Assistant 是一个把「镜像代理加速」与「容器镜像更新」
 mkdir -p /opt/docker-assistant && cd /opt/docker-assistant
 ```
 
-把项目代码放到该目录下，最终结构：
+创建 `docker-compose.yml`（内容见下方）。
+
+### 2. 目录结构
 
 ```
 /opt/docker-assistant/
 ├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-├── README.md
-├── config/                # 空目录，运行时自动生成 config.yaml
-└── app/
-    └── ...
+├── config/                # 空目录，首次启动自动生成 config.yaml
+└── data/                  # 空目录，存放数据库与日志
 ```
 
 > **无需提前准备 `config.yaml`**：首次启动时程序会自动生成一份带完整注释的默认配置。
 
-### 2. 启动
-
-```bash
-docker compose up -d --build
-```
-
-首次启动会自动完成：
-
-1. 生成 `config/config.yaml`（内置默认值 + 说明注释）
-2. 初始化 SQLite 数据库
-3. 后台拉取免费镜像节点
-4. 后台执行首次在线检测、速度测试
-5. 后台执行首次容器检测
-
-### 3. 访问
-
-| 功能                   | 地址                     |
-| ---------------------- | ------------------------ |
-| Web 管理后台           | `http://<host>:8000/`    |
-| 镜像代理入口           | `http://<host>:8000`     |
-| 代理协议入口（v2 API） | `http://<host>:8000/v2/` |
-
-默认管理后台账号：`admin` / `change_me`（**请务必修改**）。
-
-### 4. docker-compose.yml 参考
+### 3. docker-compose.yml
 
 ```yaml
 services:
   docker-assistant:
-    build:
-      context: .
-      args:
-        # 基础镜像。默认走国内公共代理（DaoCloud）。
-        #
-        # 换成其他可用地址（按需替换）：
-        #   - DaoCloud 代理：       docker.m.daocloud.io/library/python:3.12.10-slim
-        #   - 1ms 代理：            docker.1ms.run/library/python:3.12.10-slim
-        #   - 1Panel 代理：         docker.1panel.live/library/python:3.12.10-slim
-        #   - 阿里云个人加速器：     <your-id>.mirror.aliyuncs.com/library/python:3.12.10-slim
-        #   - 直连官方 Docker Hub： python:3.12.10-slim
-        BASE_IMAGE: docker.m.daocloud.io/library/python:3.12.10-slim
-    image: docker-assistant:latest
+    image: docker.cnb.cool/1983shake/docker-assistant:latest
     container_name: docker-assistant
     restart: unless-stopped
     ports:
@@ -123,7 +85,31 @@ services:
       - DATA_DIR=/app/data
 ```
 
-### 5. 快速验证
+### 4. 启动
+
+```bash
+docker compose up -d
+```
+
+首次启动会自动完成：
+
+1. 生成 `config/config.yaml`（内置默认值 + 说明注释）
+2. 初始化 SQLite 数据库
+3. 后台拉取免费镜像节点
+4. 后台执行首次在线检测、速度测试
+5. 后台执行首次容器检测
+
+### 5. 访问
+
+| 功能                   | 地址                     |
+| ---------------------- | ------------------------ |
+| Web 管理后台           | `http://<host>:8000/`    |
+| 镜像代理入口           | `http://<host>:8000`     |
+| 代理协议入口（v2 API） | `http://<host>:8000/v2/` |
+
+默认管理后台账号：`admin` / `change_me`（**请务必修改**）。
+
+### 6. 快速验证
 
 ```bash
 # 本机直接验证代理是否工作
@@ -269,18 +255,6 @@ environment:
   - TZ=Asia/Shanghai # 改为你的时区
 ```
 
-### 4. 构建时基础镜像（按需）
-
-若默认的 DaoCloud 代理不可用，编辑 `docker-compose.yml`：
-
-```yaml
-build:
-  args:
-    BASE_IMAGE: docker.1ms.run/library/python:3.12.10-slim
-```
-
-然后重新构建。
-
 ---
 
 ## 需要注意事项
@@ -314,7 +288,7 @@ build:
 
 ### 4. 无 `.env` 文件也能正常工作
 
-本项目**没有 `.env.example`，也不依赖 `.env` 文件**。所有容器级参数（端口、时区、基础镜像）都硬编码在 `docker-compose.yml` 里，需要修改时直接编辑该文件。
+本项目**没有 `.env.example`，也不依赖 `.env` 文件**。所有容器级参数（端口、时区）都硬编码在 `docker-compose.yml` 里，需要修改时直接编辑该文件。
 
 应用级配置统一放在 `config/config.yaml`，首次启动自动生成，之后通过 Web 后台或直接编辑修改。
 
@@ -328,8 +302,7 @@ build:
 ### 6. 升级步骤
 
 ```bash
-git pull                      # 或替换代码
-docker compose build --no-cache
+docker compose pull
 docker compose up -d
 ```
 
@@ -402,7 +375,7 @@ docker compose up -d
 
 若仍遇到：
 
-- 确认使用的镜像是最新构建（`docker compose build --no-cache` 后重启）
+- 确认使用的是最新镜像（`docker compose pull` 后再启动）
 - 检查容器本身是否真的配置了重复挂载
 
 ---
