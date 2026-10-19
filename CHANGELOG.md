@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > 测试版本记录：正式发版前的改动累积于此。发版时整段转为正式版本记录。
 
+## [1.3.1] - 2026-10-19
+
+拉取统计无感刷新修复 · Docker 构建去依赖 CHANGELOG.md
+
+- 修复：顶部「N 次拉取（成功/失败/取消）」统计更新镜像后不无感刷新——模板误用 Jinja 定界符 `{{ }}`（服务端渲染成静态文本），改为 Vue 定界符 `[[ ]]` 恢复响应式
+- 工程：Docker 构建不再依赖 `CHANGELOG.md`（`Dockerfile` 移除 `COPY`，运行时文件缺失由 `get_changelog()` 容错返回空）
+
 ## [1.3.0] - 2026-10-16
 
 取消强制关闭 · 拉取记录无感刷新 · 构建缓存明细清理 · 全流程优化

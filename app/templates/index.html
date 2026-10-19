@@ -390,10 +390,10 @@
                              @click="openPullsModal()"
                              title="点击查看最近拉取记录">
                             <span class="font-bold tracking-wide">
-                                {{ pull_stats.total }} 次拉取
+                                [[ pull_stats.total ]] 次拉取
                             </span>
                             <span class="text-xs opacity-80 ml-1">
-                                (成功 {{ pull_stats.success }} / 失败 {{ pull_stats.failed }} / 取消 {{ pull_stats.cancelled }})
+                                (成功 [[ pull_stats.success ]] / 失败 [[ pull_stats.failed ]] / 取消 [[ pull_stats.cancelled ]])
                             </span>
                         </div>
 
