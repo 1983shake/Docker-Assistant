@@ -93,7 +93,6 @@ RUN set -eux; \
     fi
 
 COPY app ./app
-COPY CHANGELOG.md ./CHANGELOG.md
 
 RUN mkdir -p /app/config /app/data
 
