@@ -1,11 +1,12 @@
 """代理节点管理：拉取、检测、测速、候选排序、熔断、粘性。"""
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from sqlmodel import Session, select
@@ -436,26 +437,33 @@ async def fetch_and_update_proxies() -> int:
 # ============================================================
 
 
-async def check_node_alive(node: ProxyNode) -> tuple[bool, float, Optional[str]]:
+async def check_node_alive(node: ProxyNode, client: Optional[httpx.AsyncClient] = None) -> tuple[bool, float, Optional[str]]:
     """
     在线检测：只探测 /v2/。
     200/401/302 视为存活，其余视为失败。
+
+    client 非空时复用调用方的共享连接（批量检测时避免每个节点
+    重复建立 TCP/TLS 连接）；为空时自建客户端，行为与旧版一致。
     """
     base = node.url.rstrip("/")
     auth = (node.username, node.password) if node.username and node.password else None
+    timeout = config.health_check.timeout_seconds
 
     start = time.time()
     try:
-        async with httpx.AsyncClient(
-            timeout=config.health_check.timeout_seconds,
-            follow_redirects=True,
-            auth=auth,
-        ) as client:
-            resp = await client.get(base + "/v2/")
-            latency = (time.time() - start) * 1000
-            if resp.status_code in (200, 401, 302):
-                return True, latency, None
-            return False, 9999.0, f"v2 status {resp.status_code}"
+        if client is not None:
+            resp = await client.get(base + "/v2/", timeout=timeout, auth=auth, follow_redirects=True)
+        else:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                auth=auth,
+            ) as own:
+                resp = await own.get(base + "/v2/")
+        latency = (time.time() - start) * 1000
+        if resp.status_code in (200, 401, 302):
+            return True, latency, None
+        return False, 9999.0, f"v2 status {resp.status_code}"
     except httpx.ConnectTimeout:
         return False, 9999.0, "连接超时"
     except httpx.ReadTimeout:
@@ -497,8 +505,58 @@ async def _check_one_alive(nid: int):
         session.commit()
 
 
+async def _probe_one_alive(node: ProxyNode, client: httpx.AsyncClient) -> Dict[str, Any]:
+    """探测单节点存活（共享客户端，不写库），返回待批量写入的结果。"""
+    alive, latency, error = await check_node_alive(node, client=client)
+    return {
+        "id": node.id,
+        "name": node.name,
+        "alive": alive,
+        "latency": latency,
+        "error": error,
+    }
+
+
+def _write_health_results(results: list) -> None:
+    """批量写入检测结果：节点字段 + 健康日志，一次事务提交。
+
+    替代旧实现中「每节点开两次会话、逐个提交」的写法，
+    节点数量大时显著降低数据库开销。
+    """
+    if not results:
+        return
+    with Session(engine) as session:
+        logs = []
+        for r in results:
+            db_node = session.get(ProxyNode, r["id"])
+            if db_node is None:
+                continue
+            if not db_node.manually_disabled:
+                db_node.latency = r["latency"] if r["alive"] else 9999.0
+                db_node.failure_reason = r["error"]
+                db_node.last_check = get_shanghai_time()
+                db_node.enabled = r["alive"]
+                session.add(db_node)
+            logs.append(
+                HealthCheckLog(
+                    node_id=r["id"],
+                    node_name=r["name"],
+                    success=r["alive"],
+                    latency=r["latency"],
+                    error_message=r["error"],
+                )
+            )
+        session.add_all(logs)
+        session.commit()
+
+
 async def run_health_check(ids: list[int] = None):
-    """在线检测：只判断节点是否可达，不做速度测试。"""
+    """在线检测：只判断节点是否可达，不做速度测试。
+
+    实现要点：
+      - 全程共用一个 httpx.AsyncClient（连接池复用，避免每节点重复握手）；
+      - 节点列表一次性读出，每批探测结果一次性写入（一次事务）。
+    """
     logger.info("开始在线检测...")
     _progress_start("health_check", "在线检测", message="准备中…")
 
@@ -506,32 +564,33 @@ async def run_health_check(ids: list[int] = None):
         query = select(ProxyNode).where(ProxyNode.manually_disabled == False)
         if ids:
             query = query.where(ProxyNode.id.in_(ids))
-        nodes = session.exec(query).all()
-        node_ids = [n.id for n in nodes]
+        nodes = list(session.exec(query).all())
 
-    total = len(node_ids)
+    total = len(nodes)
     _progress_update("health_check", total=total, message=f"共 {total} 个节点")
 
     if total == 0:
         _progress_finish("health_check", "无节点可检测")
         return
 
-    batch_size = config.health_check.concurrent_batch
+    batch_size = max(1, int(config.health_check.concurrent_batch or 10))
     done_count = 0
-    lock = asyncio.Lock()
+    loop = asyncio.get_running_loop()
 
-    async def _wrap(nid: int):
-        nonlocal done_count
-        try:
-            await _check_one_alive(nid)
-        finally:
-            async with lock:
-                done_count += 1
-                _progress_update("health_check", done=done_count)
-
-    for i in range(0, total, batch_size):
-        batch = node_ids[i : i + batch_size]
-        await asyncio.gather(*[_wrap(nid) for nid in batch])
+    async with httpx.AsyncClient(
+        timeout=config.health_check.timeout_seconds,
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=max(batch_size * 2, 20),
+            max_keepalive_connections=max(batch_size, 10),
+        ),
+    ) as client:
+        for i in range(0, total, batch_size):
+            batch = nodes[i : i + batch_size]
+            results = await asyncio.gather(*[_probe_one_alive(n, client) for n in batch])
+            await loop.run_in_executor(None, _write_health_results, results)
+            done_count += len(batch)
+            _progress_update("health_check", done=done_count)
 
     logger.info(f"在线检测完成，共检测 {total} 个节点")
     _progress_finish("health_check", f"完成，共 {total} 个节点")
@@ -608,9 +667,13 @@ async def _fetch_with_auth(
     headers: dict,
     node: ProxyNode,
 ) -> Optional[httpx.Response]:
-    """GET 请求；遇到 401 时自动获取 token 并重试。返回 Response 或 None。"""
+    """GET 请求；遇到 401 时自动获取 token 并重试。返回 Response 或 None。
+
+    auth 按请求下发（兼容共享客户端：不同节点凭证不同）。
+    """
+    auth = (node.username, node.password) if node.username and node.password else None
     try:
-        r = await client.get(url, headers=headers)
+        r = await client.get(url, headers=headers, auth=auth)
     except Exception as e:
         logger.debug(f"请求失败 {url[:100]}: {e}")
         return None
@@ -625,7 +688,7 @@ async def _fetch_with_auth(
     new_headers = dict(headers)
     new_headers["Authorization"] = f"Bearer {token}"
     try:
-        return await client.get(url, headers=new_headers)
+        return await client.get(url, headers=new_headers, auth=auth)
     except Exception as e:
         logger.debug(f"带 token 重试失败 {url[:100]}: {e}")
         return None
@@ -657,16 +720,17 @@ async def _download_blob_with_auth(
     """下载 blob，支持 401 认证重试。返回 (下载字节数, 耗时秒数)。"""
     start = time.time()
     total_bytes = 0
+    auth = (node.username, node.password) if node.username and node.password else None
 
     try:
-        async with client.stream("GET", blob_url, headers=base_headers) as r:
+        async with client.stream("GET", blob_url, headers=base_headers, auth=auth) as r:
             if r.status_code == 401:
                 token = await _get_speed_test_token(client, r, node.username, node.password)
                 if not token:
                     return 0, 0.0
                 auth_headers = dict(base_headers)
                 auth_headers["Authorization"] = f"Bearer {token}"
-                async with client.stream("GET", blob_url, headers=auth_headers) as r2:
+                async with client.stream("GET", blob_url, headers=auth_headers, auth=auth) as r2:
                     if r2.status_code != 200:
                         return 0, 0.0
                     async for chunk in r2.aiter_bytes():
@@ -688,8 +752,12 @@ async def _download_blob_with_auth(
     return total_bytes, elapsed
 
 
-async def test_node_speed(node: ProxyNode) -> float:
-    """固定时长内下载 layer，计算 bytes/sec。"""
+async def test_node_speed(node: ProxyNode, client: Optional[httpx.AsyncClient] = None) -> float:
+    """固定时长内下载 layer，计算 bytes/sec。
+
+    client 非空时复用调用方的共享连接（批量测速时避免每节点重复建连）；
+    为空时自建客户端，行为与旧版一致。
+    """
     if not config.speed_test.enabled:
         return 0.0
 
@@ -702,12 +770,13 @@ async def test_node_speed(node: ProxyNode) -> float:
     base = node.url.rstrip("/")
     auth = (node.username, node.password) if node.username and node.password else None
 
+    if client is not None:
+        client_ctx = contextlib.nullcontext(client)
+    else:
+        client_ctx = httpx.AsyncClient(timeout=15.0, follow_redirects=True, auth=auth)
+
     try:
-        async with httpx.AsyncClient(
-            timeout=15.0,
-            follow_redirects=True,
-            auth=auth,
-        ) as client:
+        async with client_ctx as client:
             headers = {
                 "Accept": (
                     "application/vnd.docker.distribution.manifest.v2+json,"
@@ -792,8 +861,29 @@ async def _test_one_speed(node: ProxyNode):
             session.commit()
 
 
+def _write_speed_results(results: list) -> None:
+    """批量写入测速结果（一次事务），替代每节点单独提交。"""
+    if not results:
+        return
+    with Session(engine) as session:
+        for nid, speed in results:
+            db_node = session.get(ProxyNode, nid)
+            if db_node is None:
+                continue
+            db_node.speed = speed
+            db_node.updated_at = get_shanghai_time()
+            session.add(db_node)
+        session.commit()
+
+
 async def run_speed_test(ids: list[int] = None):
-    """对当前所有存活节点进行速度测试。"""
+    """对当前所有存活节点进行速度测试。
+
+    实现要点：
+      - 全程共用一个 httpx.AsyncClient（连接池复用，避免每节点重复握手）；
+      - 测速结果按批合并写入数据库（一次事务），降低提交开销；
+      - 单节点异常不再中断整轮测试（记录 0 并继续）。
+    """
     if not config.speed_test.enabled:
         logger.info("速度测试已禁用，跳过")
         return
@@ -805,8 +895,7 @@ async def run_speed_test(ids: list[int] = None):
         query = select(ProxyNode).where(ProxyNode.enabled == True).where(ProxyNode.manually_disabled == False)
         if ids:
             query = query.where(ProxyNode.id.in_(ids))
-        nodes = session.exec(query).all()
-        node_list = list(nodes)
+        node_list = list(session.exec(query).all())
 
     total = len(node_list)
     _progress_update("speed_test", total=total, message=f"共 {total} 个节点")
@@ -816,21 +905,49 @@ async def run_speed_test(ids: list[int] = None):
         _progress_finish("speed_test", "无存活节点")
         return
 
-    sem = asyncio.Semaphore(config.speed_test.concurrent_batch)
+    concurrency = max(1, int(config.speed_test.concurrent_batch or 5))
+    sem = asyncio.Semaphore(concurrency)
     done_count = 0
+    pending: list = []
     lock = asyncio.Lock()
+    loop = asyncio.get_running_loop()
 
-    async def _wrapped(n: ProxyNode):
-        nonlocal done_count
-        async with sem:
-            try:
-                await _test_one_speed(n)
-            finally:
+    async def _flush():
+        nonlocal pending
+        async with lock:
+            batch = pending
+            pending = []
+        if batch:
+            await loop.run_in_executor(None, _write_speed_results, batch)
+
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=max(concurrency * 2, 20),
+            max_keepalive_connections=max(concurrency, 10),
+        ),
+    ) as client:
+
+        async def _wrapped(n: ProxyNode):
+            nonlocal done_count
+            async with sem:
+                try:
+                    speed = await test_node_speed(n, client=client)
+                except Exception as e:
+                    logger.warning(f"测速异常 {n.name}: {e}")
+                    speed = 0.0
                 async with lock:
+                    pending.append((n.id, speed))
                     done_count += 1
                     _progress_update("speed_test", done=done_count)
+                    need_flush = len(pending) >= 20
+                if need_flush:
+                    await _flush()
 
-    await asyncio.gather(*[_wrapped(n) for n in node_list])
+        await asyncio.gather(*[_wrapped(n) for n in node_list])
+        await _flush()
+
     logger.info(f"速度测试完成，共测试 {total} 个节点")
     _progress_finish("speed_test", f"完成，共 {total} 个节点")
 

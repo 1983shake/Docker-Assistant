@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import docker
@@ -44,29 +45,40 @@ class DockerService:
         return container_id.startswith(self.self_id[:12])
 
     # ------------------------------------------------------------------ #
+    def _container_to_dict(self, c) -> Dict[str, Any]:
+        """把 docker 容器对象转换为统一的结构（list_containers / get_container_info 共用）。"""
+        attrs = c.attrs
+        cfg = attrs.get("Config") or {}
+        labels = cfg.get("Labels") or {}
+        return {
+            "id": c.id,
+            "short_id": c.id[:12],
+            "name": c.name,
+            "image": cfg.get("Image"),
+            "image_id": attrs.get("Image"),
+            "status": c.status,
+            "running": c.status == "running",
+            "created": attrs.get("Created"),
+            "labels": labels,
+            "compose_project": labels.get("com.docker.compose.project"),
+            "compose_service": labels.get("com.docker.compose.service"),
+            "is_self": self.is_self(c.id),
+        }
+
     def list_containers(self) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for c in self.client.containers.list(all=True):
-            attrs = c.attrs
-            cfg = attrs.get("Config") or {}
-            labels = cfg.get("Labels") or {}
-            out.append(
-                {
-                    "id": c.id,
-                    "short_id": c.id[:12],
-                    "name": c.name,
-                    "image": cfg.get("Image"),
-                    "image_id": attrs.get("Image"),
-                    "status": c.status,
-                    "running": c.status == "running",
-                    "created": attrs.get("Created"),
-                    "labels": labels,
-                    "compose_project": labels.get("com.docker.compose.project"),
-                    "compose_service": labels.get("com.docker.compose.service"),
-                    "is_self": self.is_self(c.id),
-                }
-            )
-        return out
+        return [self._container_to_dict(c) for c in self.client.containers.list(all=True)]
+
+    def get_container_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """按名称直查单个容器（不存在返回 None）。
+
+        替代「list_containers 全量列表再逐个比对」的写法，
+        单容器检测 / 更新后校验场景下少一次全量枚举。
+        """
+        try:
+            c = self.client.containers.get(name)
+        except NotFound:
+            return None
+        return self._container_to_dict(c)
 
     # ------------------------------------------------------------------ #
     def image_exists(self, image_ref: str) -> bool:
@@ -96,6 +108,14 @@ class DockerService:
         on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[str, str]:
         """拉取镜像，返回 (最终使用的镜像引用, 源标签)。
+
+        取消语义（强制关闭）：
+          - should_cancel 由调用方提供（如 updater_service._is_cancelled）；
+          - 每次拉取使用独立的 DockerClient，并由看门狗线程每 0.2s 轮询取消标志；
+          - 一旦取消，看门狗直接 close() 该客户端：拉取连接被强制关闭，
+            阻塞中的流式读取立即返回/抛错，Docker daemon 侧拉取随之中断，
+            不会出现取消后任务一直挂着的情况；
+          - 共享客户端仅在看门狗客户端创建失败时兜底，此时退化为协作式取消。
 
         通过 on_progress 上报的事件结构：
           {
@@ -132,178 +152,223 @@ class DockerService:
                 " | ".join(f"{lbl} -> {src}" for src, lbl in candidates),
             )
 
-        errors: List[str] = []
-        for src, label in candidates:
-            if should_cancel and should_cancel():
-                raise PullCancelled()
+        # ============================================================
+        #  独立拉取客户端 + 取消强杀看门狗
+        # ============================================================
+        pull_client = self.client
+        can_force_close = False
+        try:
+            pull_client = docker.DockerClient.from_env()
+            can_force_close = True
+        except Exception as e:
+            logger.warning("创建独立拉取客户端失败，回退共享客户端（取消退化为协作式）: %s", e)
 
-            # 按 layer 聚合：{layer_id: {"current", "total", "downloaded", "extracted"}}
-            layers: Dict[str, Dict[str, Any]] = {}
+        stop_watch = threading.Event()
 
-            try:
-                logger.info("从 %s 拉取 %s", label, src)
-
-                for event in self.client.api.pull(src, stream=True, decode=True):
+        def _watch_cancel() -> None:
+            while not stop_watch.wait(0.2):
+                try:
                     if should_cancel and should_cancel():
-                        logger.info("拉取 %s 被取消", src)
+                        logger.info("收到取消请求，强制关闭拉取连接（%s）", image_ref)
+                        if can_force_close:
+                            try:
+                                pull_client.close()
+                            except Exception:
+                                pass
+                        return
+                except Exception:
+                    return
+
+        watcher: Optional[threading.Thread] = None
+        if should_cancel is not None:
+            watcher = threading.Thread(target=_watch_cancel, name="pull-cancel-watchdog", daemon=True)
+            watcher.start()
+
+        errors: List[str] = []
+        try:
+            for src, label in candidates:
+                if should_cancel and should_cancel():
+                    raise PullCancelled()
+
+                # 按 layer 聚合：{layer_id: {"current", "total", "downloaded", "extracted"}}
+                layers: Dict[str, Dict[str, Any]] = {}
+
+                try:
+                    logger.info("从 %s 拉取 %s", label, src)
+
+                    for event in pull_client.api.pull(src, stream=True, decode=True):
+                        if should_cancel and should_cancel():
+                            logger.info("拉取 %s 被取消", src)
+                            raise PullCancelled()
+
+                        if not isinstance(event, dict):
+                            continue
+
+                        err = event.get("error") or (event.get("errorDetail") or {}).get("message")
+                        if err:
+                            raise RuntimeError(err)
+
+                        status = (event.get("status") or "").strip()
+                        lid = event.get("id")
+                        detail = event.get("progressDetail") or {}
+                        cur = detail.get("current")
+                        tot = detail.get("total")
+
+                        # ---------- 更新层状态 ----------
+                        if lid:
+                            entry = layers.setdefault(
+                                lid,
+                                {"current": 0, "total": 0, "downloaded": False, "extracted": False},
+                            )
+
+                            if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
+                                entry["total"] = tot
+                                if cur > entry["current"]:
+                                    entry["current"] = cur
+
+                            if status == "Download complete":
+                                entry["downloaded"] = True
+                                if entry["total"] > 0:
+                                    entry["current"] = entry["total"]
+                            elif status == "Pull complete":
+                                entry["downloaded"] = True
+                                entry["extracted"] = True
+                                if entry["total"] > 0:
+                                    entry["current"] = entry["total"]
+                            elif status == "Already exists":
+                                entry["downloaded"] = True
+                                entry["extracted"] = True
+
+                        if on_progress is None:
+                            continue
+
+                        # ---------- 汇总 ----------
+                        total_b = 0
+                        cur_b = 0
+                        layers_total = len(layers)
+                        downloaded_cnt = 0
+                        extracted_cnt = 0
+                        for v in layers.values():
+                            t = int(v.get("total") or 0)
+                            c = int(v.get("current") or 0)
+                            if t > 0:
+                                total_b += t
+                                cur_b += min(c, t)
+                            if v.get("downloaded"):
+                                downloaded_cnt += 1
+                            if v.get("extracted"):
+                                extracted_cnt += 1
+
+                        # ---------- 判断阶段 ----------
+                        if layers_total == 0:
+                            phase = "preparing"
+                        elif downloaded_cnt < layers_total:
+                            phase = "downloading"
+                        elif extracted_cnt < layers_total:
+                            phase = "extracting"
+                        else:
+                            phase = "ready"
+
+                        try:
+                            on_progress(
+                                {
+                                    "phase": phase,
+                                    "status": status,
+                                    "layer_id": lid,
+                                    "current": cur_b,
+                                    "total": total_b,
+                                    "layers_total": layers_total,
+                                    "layers_downloaded": downloaded_cnt,
+                                    "layers_extracted": extracted_cnt,
+                                }
+                            )
+                        except Exception:
+                            pass
+
+                    # 强制关闭可能导致流静默结束（EOF 而非异常），取消时立即中断
+                    if should_cancel and should_cancel():
+                        logger.info("拉取 %s 连接已被强制关闭", src)
                         raise PullCancelled()
 
-                    if not isinstance(event, dict):
-                        continue
-
-                    err = event.get("error") or (event.get("errorDetail") or {}).get("message")
-                    if err:
-                        raise RuntimeError(err)
-
-                    status = (event.get("status") or "").strip()
-                    lid = event.get("id")
-                    detail = event.get("progressDetail") or {}
-                    cur = detail.get("current")
-                    tot = detail.get("total")
-
-                    # ---------- 更新层状态 ----------
-                    if lid:
-                        entry = layers.setdefault(
-                            lid,
-                            {"current": 0, "total": 0, "downloaded": False, "extracted": False},
-                        )
-
-                        if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
-                            entry["total"] = tot
-                            if cur > entry["current"]:
-                                entry["current"] = cur
-
-                        if status == "Download complete":
-                            entry["downloaded"] = True
-                            if entry["total"] > 0:
-                                entry["current"] = entry["total"]
-                        elif status == "Pull complete":
-                            entry["downloaded"] = True
-                            entry["extracted"] = True
-                            if entry["total"] > 0:
-                                entry["current"] = entry["total"]
-                        elif status == "Already exists":
-                            entry["downloaded"] = True
-                            entry["extracted"] = True
-
-                    if on_progress is None:
-                        continue
-
-                    # ---------- 汇总 ----------
-                    total_b = 0
-                    cur_b = 0
-                    layers_total = len(layers)
-                    downloaded_cnt = 0
-                    extracted_cnt = 0
-                    for v in layers.values():
-                        t = int(v.get("total") or 0)
-                        c = int(v.get("current") or 0)
-                        if t > 0:
-                            total_b += t
-                            cur_b += min(c, t)
-                        if v.get("downloaded"):
-                            downloaded_cnt += 1
-                        if v.get("extracted"):
-                            extracted_cnt += 1
-
-                    # ---------- 判断阶段 ----------
-                    if layers_total == 0:
-                        phase = "preparing"
-                    elif downloaded_cnt < layers_total:
-                        phase = "downloading"
-                    elif extracted_cnt < layers_total:
-                        phase = "extracting"
-                    else:
-                        phase = "ready"
-
-                    try:
-                        on_progress(
-                            {
-                                "phase": phase,
-                                "status": status,
-                                "layer_id": lid,
-                                "current": cur_b,
-                                "total": total_b,
-                                "layers_total": layers_total,
-                                "layers_downloaded": downloaded_cnt,
-                                "layers_extracted": extracted_cnt,
-                            }
-                        )
-                    except Exception:
-                        pass
-
-                # ---------- 拉取收尾上报 ----------
-                if on_progress:
-                    total_b = 0
-                    cur_b = 0
-                    for v in layers.values():
-                        t = int(v.get("total") or 0)
-                        c = int(v.get("current") or 0)
-                        if t > 0:
-                            total_b += t
-                            cur_b += min(c, t)
-                    try:
-                        on_progress(
-                            {
-                                "phase": "ready",
-                                "status": "Pull complete",
-                                "layer_id": None,
-                                "current": cur_b,
-                                "total": total_b,
-                                "layers_total": len(layers),
-                                "layers_downloaded": len(layers),
-                                "layers_extracted": len(layers),
-                            }
-                        )
-                    except Exception:
-                        pass
-
-                # ========================================================
-                #  清理代理前缀 tag（v1.1.1 引入）
-                # ========================================================
-                if src != image_ref:
-                    try:
-                        img = self.client.images.get(src)
-                    except ImageNotFound:
-                        img = None
-
-                    if img is None:
-                        logger.warning("拉取完成但未找到镜像 %s（src），跳过 tag 修正", src)
-                    else:
+                    # ---------- 拉取收尾上报 ----------
+                    if on_progress:
+                        total_b = 0
+                        cur_b = 0
+                        for v in layers.values():
+                            t = int(v.get("total") or 0)
+                            c = int(v.get("current") or 0)
+                            if t > 0:
+                                total_b += t
+                                cur_b += min(c, t)
                         try:
-                            img.tag(image_ref)
-                        except Exception as e:
-                            logger.error("添加原始标签 %s 失败: %s", image_ref, e)
-                            raise
+                            on_progress(
+                                {
+                                    "phase": "ready",
+                                    "status": "Pull complete",
+                                    "layer_id": None,
+                                    "current": cur_b,
+                                    "total": total_b,
+                                    "layers_total": len(layers),
+                                    "layers_downloaded": len(layers),
+                                    "layers_extracted": len(layers),
+                                }
+                            )
+                        except Exception:
+                            pass
 
+                    # ========================================================
+                    #  清理代理前缀 tag（v1.1.1 引入）
+                    # ========================================================
+                    if src != image_ref:
                         try:
-                            self.client.images.remove(image=src, force=False, noprune=False)
-                            logger.info("已移除代理前缀标签 %s（保留原始标签 %s）", src, image_ref)
-                        except Exception as e:
-                            logger.warning("移除代理前缀标签 %s 失败: %s（镜像本体保留）", src, e)
+                            img = self.client.images.get(src)
+                        except ImageNotFound:
+                            img = None
 
-                return image_ref, label
+                        if img is None:
+                            logger.warning("拉取完成但未找到镜像 %s（src），跳过 tag 修正", src)
+                        else:
+                            try:
+                                img.tag(image_ref)
+                            except Exception as e:
+                                logger.error("添加原始标签 %s 失败: %s", image_ref, e)
+                                raise
 
-            except PullCancelled:
-                raise
-            except Exception as e:
-                err_msg = str(e)
-                logger.warning("从 %s 拉取 %s 失败: %s", label, src, err_msg)
+                            try:
+                                self.client.images.remove(image=src, force=False, noprune=False)
+                                logger.info("已移除代理前缀标签 %s（保留原始标签 %s）", src, image_ref)
+                            except Exception as e:
+                                logger.warning("移除代理前缀标签 %s 失败: %s（镜像本体保留）", src, e)
 
-                low = err_msg.lower()
-                if (
-                    "server gave http response to https client" in low
-                    or ("https" in low and "http response" in low)
-                    or ("tls" in low and "handshake" in low)
-                ):
-                    err_msg += (
-                        "（提示：目标为 HTTP 镜像源，需要在 daemon.json 的 "
-                        "insecure-registries 中加入该地址并重启 Docker。"
-                        "若使用 127.0.0.1:<port>，Docker 默认已允许 HTTP，无需额外配置。）"
-                    )
-                errors.append(f"{label}: {err_msg}")
+                    return image_ref, label
 
-        raise RuntimeError("所有拉取源均失败 -> " + "; ".join(errors))
+                except PullCancelled:
+                    raise
+                except Exception as e:
+                    err_msg = str(e)
+                    logger.warning("从 %s 拉取 %s 失败: %s", label, src, err_msg)
+
+                    low = err_msg.lower()
+                    if (
+                        "server gave http response to https client" in low
+                        or ("https" in low and "http response" in low)
+                        or ("tls" in low and "handshake" in low)
+                    ):
+                        err_msg += (
+                            "（提示：目标为 HTTP 镜像源，需要在 daemon.json 的 "
+                            "insecure-registries 中加入该地址并重启 Docker。"
+                            "若使用 127.0.0.1:<port>，Docker 默认已允许 HTTP，无需额外配置。）"
+                        )
+                    errors.append(f"{label}: {err_msg}")
+
+            raise RuntimeError("所有拉取源均失败 -> " + "; ".join(errors))
+        finally:
+            stop_watch.set()
+            if can_force_close:
+                try:
+                    pull_client.close()
+                except Exception:
+                    pass
 
     # ================================================================== #
     #  代理前缀标签工具
@@ -769,6 +834,170 @@ class DockerService:
             "deleted_tag_count": len(deleted_tags),
             "failed_count": len(failed),
             "space_reclaimed": freed,
+        }
+
+
+    # ================================================================== #
+    #  构建缓存（已下载未清理的缓存）
+    # ================================================================== #
+    @staticmethod
+    def _normalize_cache_entry(c: Dict[str, Any]) -> Dict[str, Any]:
+        """把 daemon 返回的 BuildCache 原始条目归一化。"""
+
+        def _int(v) -> int:
+            try:
+                return max(0, int(v or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        return {
+            "id": str(c.get("ID") or ""),
+            "parent": str(c.get("Parent") or ""),
+            "type": str(c.get("Type") or ""),
+            "description": str(c.get("Description") or ""),
+            "in_use": bool(c.get("InUse")),
+            "shared": bool(c.get("Shared")),
+            "size": _int(c.get("Size")),
+            "usage_count": _int(c.get("UsageCount")),
+            "created_at": str(c.get("CreatedAt") or ""),
+            "last_used_at": str(c.get("LastUsedAt") or ""),
+        }
+
+    def get_build_cache_info(self) -> Dict[str, Any]:
+        """读取 Docker 构建缓存占用（docker system df 的 BuildCache）。
+
+        返回：
+          {
+            "ok": bool,
+            "count": 缓存条数,
+            "in_use": 正在使用的缓存条数,
+            "total_size": 缓存总字节,
+            "reclaimable": 可清理字节（未被使用的缓存）,
+            "entries": 缓存明细列表（verbose 模式可用时）,
+            "error": 失败原因（ok=False 时）,
+          }
+
+        优先走 GET /system/df?verbose=1 取明细；旧 daemon 不支持时
+        回退到 api.df() 汇总（此时 entries 为空列表）。
+        """
+        api = self.client.api
+        entries: List[Dict[str, Any]] = []
+        try:
+            response = api._get(api._url("/system/df"), params={"verbose": 1})
+            df = api._result(response, True) or {}
+            raw_entries = [c for c in (df.get("BuildCache") or []) if isinstance(c, dict)]
+            entries = [self._normalize_cache_entry(c) for c in raw_entries]
+        except Exception as e:
+            logger.warning("读取构建缓存明细失败，回退汇总模式: %s", e)
+            try:
+                df = api.df() or {}
+                raw_entries = [c for c in (df.get("BuildCache") or []) if isinstance(c, dict)]
+                entries = [self._normalize_cache_entry(c) for c in raw_entries]
+            except Exception as e2:
+                logger.warning("读取构建缓存信息失败: %s", e2)
+                return {
+                    "ok": False,
+                    "error": str(e2),
+                    "count": 0,
+                    "in_use": 0,
+                    "total_size": 0,
+                    "reclaimable": 0,
+                    "entries": [],
+                }
+
+        total = 0
+        reclaimable = 0
+        in_use = 0
+        for c in entries:
+            total += c["size"]
+            if c["in_use"]:
+                in_use += 1
+            else:
+                reclaimable += c["size"]
+
+        return {
+            "ok": True,
+            "count": len(entries),
+            "in_use": in_use,
+            "total_size": total,
+            "reclaimable": reclaimable,
+            "entries": entries,
+        }
+
+    def prune_build_cache(self, ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """清理 Docker 构建缓存（已下载未清理的缓存）。
+
+        ids 为空：等价于 `docker builder prune`，清理全部未使用缓存。
+        ids 非空：按 ID 精确清理（需 Docker Engine API v1.51+ 的 id 过滤器）；
+                  旧版本 daemon 不支持 id 过滤时，回退为清理全部未使用缓存，
+                  并在返回值的 note 字段说明。
+
+        返回：
+          {
+            "ok": bool,
+            "deleted_count": 实际删除条数,
+            "space_reclaimed": 释放字节,
+            "deleted_ids": 实际删除的缓存 ID 列表,
+            "requested_count": 请求清理的条数（0 表示清理全部）,
+            "note": 降级/偏差说明（可选）,
+          }
+        """
+        api = self.client.api
+        selected = [str(i).strip() for i in (ids or []) if str(i or "").strip()]
+
+        note: Optional[str] = None
+        try:
+            if selected:
+                if hasattr(api, "prune_builds"):
+                    try:
+                        result = api.prune_builds(filters={"id": selected}) or {}
+                    except APIError as e:
+                        logger.warning("按 ID 清理构建缓存失败，回退清理全部未使用缓存: %s", e)
+                        note = "当前 Docker 版本不支持按条目精确清理，已改为清理全部未使用缓存"
+                        result = api.prune_builds() or {}
+                else:
+                    raise RuntimeError(
+                        "当前 docker-py 版本不支持按 ID 清理构建缓存，请升级 docker-py 或使用「清理全部」"
+                    )
+            else:
+                if hasattr(api, "prune_builds"):
+                    result = api.prune_builds() or {}
+                else:
+                    # docker-py 未提供该高层方法时，直接调用 Engine API
+                    response = api._post_json(api._url("/build/prune"), None)
+                    result = api._result(response, True) or {}
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"清理构建缓存失败：{e}") from e
+
+        deleted = result.get("CachesDeleted") or []
+        deleted_ids = [str(d) for d in deleted if d]
+        try:
+            reclaimed = max(0, int(result.get("SpaceReclaimed") or 0))
+        except (TypeError, ValueError):
+            reclaimed = 0
+
+        # daemon 忽略 id 过滤时实际删除可能超出选择范围，如实提示
+        if selected and not note:
+            sel = set(selected)
+            extra = [d for d in deleted_ids if d not in sel]
+            if extra:
+                note = f"Docker 未按 ID 精确清理，实际额外删除 {len(extra)} 条未使用缓存"
+
+        logger.info(
+            "构建缓存清理完成：删除 %d 条，释放 %.2f MB%s",
+            len(deleted_ids),
+            reclaimed / 1024 / 1024,
+            f"（{note}）" if note else "",
+        )
+        return {
+            "ok": True,
+            "deleted_count": len(deleted_ids),
+            "space_reclaimed": reclaimed,
+            "deleted_ids": deleted_ids,
+            "requested_count": len(selected),
+            "note": note,
         }
 
 

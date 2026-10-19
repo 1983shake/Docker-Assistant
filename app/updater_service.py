@@ -15,9 +15,14 @@ from sqlmodel import Session, select
 
 from app.config import DATA_DIR, config, save_config
 from app.core import progress, log_handler
-from app.db import engine, ProxyNode
+from app.db import engine, ProxyNode, get_shanghai_time
 from app.docker_service import docker_service, PullCancelled
-from app.registry import get_remote_digests_multi, parse_image_reference
+from app.registry import (
+    DOCKER_HUB_REGISTRIES,
+    get_remote_digests_multi,
+    parse_image_reference,
+)
+from app import traffic as traffic_logger
 
 logger = logging.getLogger("dockerassistant.updater")
 
@@ -142,6 +147,27 @@ def _expand_mirrors_for_pull(mirrors: List[str]) -> List[str]:
         else:
             out.append(m)
     return out
+
+
+# ============================================================
+#  拉取记录（更新器补记）
+# ============================================================
+def _pull_record_image_tag(target: str) -> Tuple[str, str]:
+    """把镜像引用拆成拉取记录用的 (image, tag)。
+
+    与代理侧记录的命名保持一致：Docker Hub 镜像去掉 registry 与
+    library/ 前缀（如 nginx），其他镜像保留 registry/repository
+    （如 ghcr.io/user/app）。
+    """
+    try:
+        registry, repository, tag = parse_image_reference(target or "")
+    except Exception:
+        return (target or "").strip(), "latest"
+    if registry in DOCKER_HUB_REGISTRIES:
+        if repository.startswith("library/"):
+            repository = repository[len("library/") :]
+        return repository, tag
+    return f"{registry}/{repository}", tag
 
 
 # ============================================================
@@ -380,16 +406,16 @@ async def check_one(
 
     try:
         loop = asyncio.get_running_loop()
-        local_digest = await loop.run_in_executor(None, docker_service.get_local_digest, target_ref)
-        result["local_digest"] = local_digest
-
-        if manual:
-            progress.update(task_key, done=30, message="查询远程 digest…")
 
         raw_mirrors, use_direct, reason = _resolve_check_source(target_ref)
         mirrors_for_check = _expand_mirrors_for_check(raw_mirrors)
 
-        remote_digest, source = await loop.run_in_executor(
+        if manual:
+            progress.update(task_key, done=30, message="查询本地 / 远程 digest…")
+
+        # 本地 digest 与远程 digest 相互独立，并行查询（耗时取二者较大值）
+        local_task = loop.run_in_executor(None, docker_service.get_local_digest, target_ref)
+        remote_task = loop.run_in_executor(
             None,
             lambda: get_remote_digests_multi(
                 target_ref,
@@ -399,6 +425,8 @@ async def check_one(
                 use_direct,
             ),
         )
+        local_digest, (remote_digest, source) = await asyncio.gather(local_task, remote_task)
+        result["local_digest"] = local_digest
         result["remote_digest"] = remote_digest
         result["source"] = source
 
@@ -742,7 +770,37 @@ async def perform_update(container_name: str, cfg=None) -> Dict[str, Any]:
                 on_progress=_on_pull_progress,
             )
 
-        image_ref, source = await loop.run_in_executor(None, _pull)
+        # ============================================================
+        #  拉取记录补记：更新拉取可能不经过本地代理（直连 / 外部镜像源 /
+        #  非 Docker Hub 镜像），代理侧不会生成记录；此处按结果补记，
+        #  与代理记录按「since 之后同 image+tag」去重，避免重复。
+        # ============================================================
+        pull_started_at = get_shanghai_time()
+        record_image, record_tag = _pull_record_image_tag(target)
+        source = None
+
+        def _record_pull(status: str, error_message: str = None):
+            try:
+                traffic_logger.log_updater_pull(
+                    image=record_image,
+                    tag=record_tag,
+                    status=status,
+                    error_message=error_message,
+                    source=source,
+                    since=pull_started_at,
+                )
+            except Exception as e:
+                logger.warning("[%s] 补记拉取历史失败: %s", container_name, e)
+
+        try:
+            image_ref, source = await loop.run_in_executor(None, _pull)
+        except PullCancelled:
+            _record_pull("cancelled")
+            raise
+        except Exception as e:
+            _record_pull("failed", error_message=str(e))
+            raise
+        _record_pull("success")
 
         progress.update(task_key, done=_PULL_DONE_MAX, message="拉取完成，准备重建…")
 
@@ -862,19 +920,19 @@ async def _refresh_one(
     try:
         cfg = config
         loop = asyncio.get_running_loop()
-        containers = await loop.run_in_executor(None, docker_service.list_containers)
-        for c in containers:
-            if c["name"] == name:
-                if task_key:
-                    progress.update(
-                        task_key,
-                        done=96,
-                        message="校验更新结果（比对本地 / 远程 digest）…",
-                    )
-                r = await check_one(c, cfg)
-                check_results[name] = r
-                _save_state()
-                return r
+        # 按名称直查容器，避免全量 list_containers 枚举
+        container = await loop.run_in_executor(None, docker_service.get_container_info, name)
+        if container is not None:
+            if task_key:
+                progress.update(
+                    task_key,
+                    done=96,
+                    message="校验更新结果（比对本地 / 远程 digest）…",
+                )
+            r = await check_one(container, cfg)
+            check_results[name] = r
+            _save_state()
+            return r
     except Exception:
         logger.exception("刷新 %s 状态失败", name)
     return None

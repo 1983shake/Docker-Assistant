@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
 from app import APP_INFO
@@ -249,6 +250,9 @@ app = FastAPI(
     version=APP_INFO["version"],
     lifespan=lifespan,
 )
+
+# 静态资源（logo / favicon 等）
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 app.include_router(web_router.router)
 app.include_router(proxy_router.router)

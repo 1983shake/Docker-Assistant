@@ -34,6 +34,9 @@ _pending_pulls: dict[str, dict] = {}
 _PENDING_TTL = 300  # 5 分钟：仅探测、无 blob，自动过期丢弃
 _INFLIGHT_TTL = 3600  # 1 小时：已提升，等待整次拉取的所有 blob 完成
 
+# 更新器补记拉取时的客户端标识（代理记录用的是 daemon IP）
+UPDATER_PULL_CLIENT = "本地更新"
+
 # 网络速率滑动窗口
 _SPEED_WINDOW = 5.0
 _recent_speeds: deque = deque(maxlen=1000)
@@ -373,6 +376,73 @@ def log_pull(
 # ============================================================
 #  查询 / 清理
 # ============================================================
+
+
+def log_updater_pull(
+    image: str,
+    tag: str,
+    status: str = "success",
+    error_message: str = None,
+    source: str = None,
+    since: datetime = None,
+) -> Optional[int]:
+    """记录容器更新产生的拉取（updater 专用，补记未走代理的拉取）。
+
+    背景：镜像更新时的拉取可能不经过本地代理（直连 / 外部镜像源 /
+    非 Docker Hub 镜像 / daemon 视角不可达 local），代理侧不会生成
+    拉取记录；此处在更新流程中补记，保证「更新镜像后最近拉取记录
+    必有新记录」。
+
+    去重策略：since 为本次拉取的开始时间；若该时间之后已存在同
+    image + tag 的记录（由本地代理在本次拉取过程中创建），则跳过，
+    避免与代理记录重复。since 为 None 时退化为 60 秒时间窗去重。
+    """
+    if not image:
+        return None
+    norm = _normalize_image(image) or image
+    tag = tag or "latest"
+
+    try:
+        with Session(engine) as session:
+            query = (
+                select(PullHistory)
+                .where(PullHistory.tag == tag)
+                .where(PullHistory.image.contains(norm))
+            )
+            if since is not None:
+                query = query.where(PullHistory.request_time > since)
+            else:
+                query = query.where(
+                    PullHistory.request_time > get_shanghai_time() - timedelta(seconds=_DEDUP_WINDOW)
+                )
+            existing = session.exec(
+                query.order_by(PullHistory.request_time.desc()).limit(1)
+            ).first()
+            if existing:
+                logger.debug(
+                    f"[pull-updater] 去重跳过（代理已记录 id={existing.id}）: {norm}:{tag}"
+                )
+                return None
+
+            pull = PullHistory(
+                image=image,
+                tag=tag,
+                client_ip=UPDATER_PULL_CLIENT,
+                node_name=source,
+                status=status,
+                error_message=error_message,
+            )
+            session.add(pull)
+            session.commit()
+            session.refresh(pull)
+            logger.info(
+                f"[pull-updater] 新增记录 id={pull.id} image={image} tag={tag} "
+                f"client={UPDATER_PULL_CLIENT} status={status}"
+            )
+            return pull.id
+    except Exception as e:
+        logger.error(f"记录更新拉取失败: {e}")
+        return None
 
 
 def get_pull_history(limit: int = 100):

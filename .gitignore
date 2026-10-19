@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Docker-Assistant 项目特定
+.backups/
+.workbuddy/
+data/
+config/config.yaml.bak

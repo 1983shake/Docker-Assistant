@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#0f4c81">
     <title>{{ app_name }} - {{ app_tagline }}</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="apple-touch-icon" href="/static/logo.png">
 
     <link rel="preconnect" href="https://cdn.tailwindcss.com">
     <link rel="preconnect" href="https://unpkg.com">
@@ -26,6 +28,16 @@
             -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
         }
         .gradient-bg { background: linear-gradient(135deg, #0f4c81 0%, #22d3ee 100%); }
+        .logo-badge {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 10px;
+            padding: 4px 7px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+        }
+        .header-logo { height: 42px; width: auto; display: block; }
 
         #app { visibility: hidden; }
         #app.app-ready { visibility: visible; }
@@ -364,7 +376,9 @@
             <div class="container mx-auto px-6 py-4">
                 <div class="flex justify-between items-center flex-wrap gap-3">
                     <div class="flex items-center space-x-3">
-                        <i class="fa-solid fa-water text-3xl"></i>
+                        <span class="logo-badge">
+                            <img src="/static/logo.png" alt="Docker-Assistant logo" class="header-logo">
+                        </span>
                         <div>
                             <h1 class="text-xl font-bold tracking-tight">{{ app_name }}</h1>
                             <p class="text-xs opacity-80 tracking-wide mt-0.5">{{ app_tagline }}</p>
@@ -373,7 +387,7 @@
 
                     <div class="header-stats">
                         <div class="pull-stat text-right leading-relaxed"
-                             @click="showPullsModal = true"
+                             @click="openPullsModal()"
                              title="点击查看最近拉取记录">
                             <span class="font-bold tracking-wide">
                                 {{ pull_stats.total }} 次拉取
@@ -416,11 +430,10 @@
                             </span>
 
                             <span class="header-stat-chip net"
-                                  :class="{ zero: netSpeed.total_bps < 1024, active: netSpeed.total_bps >= 1024 * 1024 }"
-                                  :title="'当前代理传输速率（' + netSpeed.window + ' 秒滑动平均）\n下载 ↓ / 上传 ↑'">
-                                <i class="fas fa-exchange-alt"></i>
-                                <span class="num">↓ [[ netSpeedText(netSpeed.down_bps) ]]</span>
-                                <span class="num">↑ [[ netSpeedText(netSpeed.up_bps) ]]</span>
+                                  :class="{ zero: netSpeed.down_bps < 1024, active: netSpeed.down_bps >= 1024 * 1024 }"
+                                  :title="'当前代理下载速率（' + netSpeed.window + ' 秒滑动平均）'">
+                                <i class="fas fa-arrow-down"></i>
+                                <span class="num">[[ netSpeedText(netSpeed.down_bps) ]]</span>
                             </span>
                         </div>
                     </div>
@@ -752,6 +765,37 @@
                                 <button id="btnUpdPruneImages" class="upd-btn ghost"><i class="fas fa-broom mr-1"></i>清理悬空镜像</button>
                                 <button id="btnUpdRefreshImages" class="upd-btn ghost"><i class="fas fa-redo mr-1"></i>刷新</button>
                             </div>
+                        </div>
+                        <div class="flex justify-between items-center mb-3 gap-2 flex-wrap">
+                            <div class="text-xs text-gray-600 flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5">
+                                <i class="fas fa-database text-gray-400"></i>
+                                <span>构建缓存（已下载未清理）：</span>
+                                <span id="updBuildCacheText" class="font-medium text-gray-800">加载中…</span>
+                            </div>
+                            <div class="flex items-center gap-1.5">
+                                <button id="btnUpdToggleBuildCache" class="upd-btn ghost"><i class="fas fa-list-ul mr-1"></i>缓存明细</button>
+                                <button id="btnUpdPruneBuildCacheSel" class="upd-btn ghost" disabled><i class="fas fa-broom mr-1"></i>清理选中</button>
+                                <button id="btnUpdPruneBuildCache" class="upd-btn ghost"><i class="fas fa-trash-alt mr-1"></i>清理全部</button>
+                            </div>
+                        </div>
+                        <div id="updBuildCachePanel" class="hidden mb-3 w-full bg-white border border-gray-200 rounded-xl overflow-x-auto shadow-sm">
+                            <table class="node-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:36px"><input type="checkbox" id="updBcChkAll" title="全选"></th>
+                                        <th>缓存 ID</th>
+                                        <th style="width:80px">类型</th>
+                                        <th>构建步骤 / 描述</th>
+                                        <th style="width:90px">大小</th>
+                                        <th style="width:80px">状态</th>
+                                        <th style="width:70px">引用次数</th>
+                                        <th style="width:130px">最近使用</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="updBuildCacheBody">
+                                    <tr><td colspan="8" class="text-center text-gray-400 py-6">暂无缓存明细</td></tr>
+                                </tbody>
+                            </table>
                         </div>
                         <div class="w-full bg-white border border-gray-200 rounded-xl overflow-x-auto shadow-sm">
                             <table class="node-table" id="updImagesTable">
@@ -1816,6 +1860,7 @@
                             proxies: JSON.parse('{{ proxies | tojson | safe }}'),
                             stats: JSON.parse('{{ stats | tojson | safe }}'),
                             pullHistory: JSON.parse('{{ pull_history | tojson | safe }}'),
+                            pull_stats: JSON.parse('{{ pull_stats | tojson | safe }}'),
                             host: window.location.host,
                             showAddModal: false, showPullsModal: false, showHelpModal: false, showLogsModal: false, showConfigModal: false,
 
@@ -2106,6 +2151,8 @@
 
                                 if (hadRunning && !hasRunningBackend && !this.manualOperation) {
                                     setTimeout(() => this._refreshCurrentView(), 200);
+                                    // 任务（如镜像更新）结束后无感刷新拉取记录
+                                    setTimeout(() => this.refreshPulls(), 200);
                                 }
                             } catch (e) {}
                         },
@@ -2114,6 +2161,7 @@
                             const v = this.currentMainView;
                             if (v === 'proxy') {
                                 this.reloadProxies();
+                                this.refreshPulls();
                             } else if (v === 'containers') {
                                 if (window.__updRefreshContainers) window.__updRefreshContainers();
                             } else if (v === 'images') {
@@ -2130,6 +2178,43 @@
                                 if (Array.isArray(data)) this.proxies = data;
                             } catch (e) {}
                         },
+                        async refreshPulls() {
+                            // 无感刷新最近拉取记录 + 拉取统计（不整体刷新页面）
+                            try {
+                                const [pullsRes, statsRes] = await Promise.all([
+                                    fetch('/api/pulls?limit=200', { cache: 'no-store' }),
+                                    fetch('/api/pulls/stats', { cache: 'no-store' }),
+                                ]);
+                                if (!pullsRes.ok) {
+                                    if (pullsRes.status === 401) {
+                                        this.pushNotification(
+                                            "拉取记录需要登录，请刷新本页面重新输入账号密码",
+                                            "err",
+                                            8000
+                                        );
+                                    }
+                                    throw new Error(`拉取记录接口返回 HTTP ${pullsRes.status}`);
+                                }
+                                const data = await pullsRes.json();
+                                if (Array.isArray(data)) this.pullHistory = data;
+                                if (statsRes.ok) {
+                                    const stats = await statsRes.json();
+                                    if (stats && typeof stats === 'object') this.pull_stats = stats;
+                                }
+                            } catch (e) {
+                                // 失败不再静默：常见原因是未登录（HTTP 401 认证），
+                                // 刷新页面触发浏览器 Basic 认证弹窗后再试即可
+                                console.error('[refreshPulls] 刷新最近拉取记录失败（影响无感刷新）：', e);
+                            }
+                        },
+                        async openPullsModal() {
+                            // 先拉取最新数据，再打开浮窗，确保用户看到的是更新后的记录，
+                            // 避免「先显示旧数据、再异步刷新」造成的「没刷新」错觉
+                            await this.refreshPulls().catch((e) =>
+                                console.error('[openPullsModal] 预刷新失败：', e)
+                            );
+                            this.showPullsModal = true;
+                        },
 
                         async cancelUpdate(name) {
                             if (!name) return;
@@ -2145,6 +2230,7 @@
                                     throw new Error(detail);
                                 }
                                 this.pushNotification(`${name} 取消请求已提交`, 'ok');
+                                this.refreshPulls();
                             } catch (e) {
                                 this.pushNotification(`取消失败：${e.message}`, 'err');
                             }
@@ -2456,6 +2542,7 @@
             window.__currentMainView = name;
             if (name === 'containers') { refreshContainers(); refreshSummary(); }
             else if (name === 'images') { refreshImages(); refreshSummary(); }
+            else if (name === 'proxy') { refreshPullRecords(); }
             else if (name === 'logs') pollLogs();
         };
 
@@ -2596,6 +2683,7 @@
         const updState = {
             containers: [], images: [], results: {},
             last_check: null, selected: new Set(), checking: false,
+            buildCache: null, bcSelected: new Set(),
         };
         const containerSort = { key: "name", dir: 1 };
         const imageSort = { key: "created", dir: -1 };
@@ -2860,8 +2948,9 @@
                         updState.selected.delete(name);
                         await refreshContainers();
                         await refreshSummary();
+                        await refreshPullRecords();
                         if (window.__currentMainView === "logs") await pollLogs();
-                    } catch (e) { toast(`${name} 更新失败：${e.message}`, "err", 8000); }
+                    } catch (e) { toast(`${name} 更新失败：${e.message}`, "err", 8000); await refreshPullRecords(); }
                     finally { btn.disabled = false; btn.textContent = "更新"; }
                 });
             });
@@ -2870,6 +2959,7 @@
                 btn.addEventListener("click", async () => {
                     await cancelUpdate(btn.dataset.name);
                     await refreshContainers();
+                    await refreshPullRecords();
                 });
             });
 
@@ -2980,6 +3070,7 @@
             btn.textContent = oldText;
             await refreshContainers();
             await refreshSummary();
+            await refreshPullRecords();
             if (window.__currentMainView === "logs") await pollLogs();
         }
 
@@ -3078,7 +3169,156 @@
                 updState.images = images || [];
                 setImageCount((images || []).length);
                 if (window.__currentMainView === "images") renderImages();
+                refreshBuildCache();
             } catch (e) { /* 静默 */ }
+        }
+        async function refreshBuildCache() {
+            const el = $("#updBuildCacheText");
+            if (!el) return;
+            try {
+                const info = await api(`${U}/images/build-cache`);
+                if (!info || info.ok === false) throw new Error((info && info.error) || "读取失败");
+                updState.buildCache = info;
+                updState.bcSelected.clear();
+                if (info.count > 0) {
+                    el.textContent = `${info.count} 条 · 共 ${formatBytes(info.total_size)}` +
+                        (info.reclaimable > 0
+                            ? ` · 可清理 ${formatBytes(info.reclaimable)}`
+                            : " · 已全部使用中");
+                } else {
+                    el.textContent = "无";
+                }
+                renderBuildCacheDetail();
+            } catch (e) {
+                el.textContent = "读取失败";
+            }
+        }
+        function buildCacheEntries() {
+            return (updState.buildCache && updState.buildCache.entries) || [];
+        }
+        function syncBuildCacheSelUI() {
+            const btn = $("#btnUpdPruneBuildCacheSel");
+            const chkAll = $("#updBcChkAll");
+            const entries = buildCacheEntries();
+            const selCount = entries.filter(e => updState.bcSelected.has(e.id)).length;
+            if (btn) {
+                btn.disabled = selCount === 0;
+                btn.innerHTML = selCount > 0
+                    ? `<i class="fas fa-broom mr-1"></i>清理选中（${selCount}）`
+                    : '<i class="fas fa-broom mr-1"></i>清理选中';
+            }
+            if (chkAll) {
+                chkAll.checked = entries.length > 0 && selCount === entries.length;
+                chkAll.indeterminate = selCount > 0 && selCount < entries.length;
+            }
+        }
+        function renderBuildCacheDetail() {
+            const tbody = $("#updBuildCacheBody");
+            if (!tbody) return;
+            const entries = buildCacheEntries();
+            if (!entries.length) {
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center text-gray-400 py-6">暂无缓存明细</td></tr>';
+                syncBuildCacheSelUI();
+                return;
+            }
+            const rows = entries.map(e => {
+                const checked = updState.bcSelected.has(e.id) ? "checked" : "";
+                const status = e.in_use
+                    ? '<span class="img-badge used"><span class="dot"></span>使用中</span>'
+                    : '<span class="img-badge unused"><span class="dot"></span>可清理</span>';
+                const desc = e.description || "—";
+                return `
+                    <tr>
+                        <td><input type="checkbox" data-role="bc-chk" data-id="${escapeHtml(e.id)}" ${checked} title="${e.in_use ? "正在使用中的缓存不会被清理" : ""}"></td>
+                        <td><code title="${escapeHtml(e.id)}">${escapeHtml(e.id.slice(0, 12))}</code></td>
+                        <td><span class="text-xs text-gray-500">${escapeHtml(e.type || "—")}</span></td>
+                        <td><span class="text-xs" title="${escapeHtml(desc)}">${escapeHtml(desc.length > 60 ? desc.slice(0, 60) + "…" : desc)}</span></td>
+                        <td>${formatBytes(e.size)}</td>
+                        <td>${status}</td>
+                        <td>${e.usage_count || 0}</td>
+                        <td><span class="text-xs text-gray-500">${escapeHtml(formatDate(e.last_used_at || e.created_at))}</span></td>
+                    </tr>`;
+            });
+            tbody.innerHTML = rows.join("");
+            tbody.querySelectorAll('[data-role="bc-chk"]').forEach(chk => {
+                chk.addEventListener("change", () => {
+                    const id = chk.dataset.id;
+                    if (chk.checked) updState.bcSelected.add(id);
+                    else updState.bcSelected.delete(id);
+                    syncBuildCacheSelUI();
+                });
+            });
+            syncBuildCacheSelUI();
+        }
+        function toggleBuildCacheDetail() {
+            const panel = $("#updBuildCachePanel");
+            if (!panel) return;
+            const willShow = panel.classList.contains("hidden");
+            panel.classList.toggle("hidden");
+            if (willShow && !buildCacheEntries().length) refreshBuildCache();
+        }
+        async function pruneBuildCache() {
+            if (!confirm("确认清理 Docker 构建缓存？\n将删除已下载但未清理的构建层缓存（不影响镜像与容器），下次构建需重新下载。")) return;
+            const TASK_KEY = "local_prune_build_cache";
+            const btn = $("#btnUpdPruneBuildCache");
+            const old = btn ? btn.innerHTML : "";
+            if (btn) { btn.disabled = true; btn.textContent = "清理中…"; }
+
+            startLocalTask(TASK_KEY, "清理构建缓存", "正在清理已下载未清理的缓存…");
+
+            try {
+                const res = await api(`${U}/images/prune-build-cache`, { method: "POST" });
+                const freed = res.space_reclaimed || 0;
+                finishLocalTask(TASK_KEY, `删除 ${res.deleted_count || 0} 条缓存，释放 ${formatBytes(freed)}`, true);
+                toast(`构建缓存已清理，释放 ${formatBytes(freed)}`);
+                await refreshBuildCache();
+                await refreshSummary();
+            } catch (e) {
+                finishLocalTask(TASK_KEY, `清理失败：${e.message}`, false);
+                toast(`清理构建缓存失败：${e.message}`, "err", 8000);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = old; }
+            }
+        }
+        async function pruneSelectedBuildCache() {
+            const ids = [...updState.bcSelected];
+            if (!ids.length) return;
+            const entries = buildCacheEntries();
+            const selEntries = entries.filter(e => ids.includes(e.id));
+            const totalSize = selEntries.reduce((s, e) => s + (e.size || 0), 0);
+            const inUseCount = selEntries.filter(e => e.in_use).length;
+            let msg = `确认清理选中的 ${ids.length} 条构建缓存（共 ${formatBytes(totalSize)}）？`;
+            if (inUseCount > 0) msg += `\n其中 ${inUseCount} 条正在使用中，不会被清理。`;
+            if (!confirm(msg)) return;
+
+            const TASK_KEY = "local_prune_build_cache_sel";
+            const btn = $("#btnUpdPruneBuildCacheSel");
+            const old = btn ? btn.innerHTML : "";
+            if (btn) { btn.disabled = true; btn.textContent = "清理中…"; }
+
+            startLocalTask(TASK_KEY, "清理选中构建缓存", `正在清理 ${ids.length} 条缓存…`);
+
+            try {
+                const res = await api(`${U}/images/prune-build-cache`, {
+                    method: "POST",
+                    body: JSON.stringify({ ids }),
+                });
+                const deleted = new Set(res.deleted_ids || []);
+                const okCount = ids.filter(i => deleted.has(i)).length;
+                const remain = ids.length - okCount;
+                let summary = `已清理 ${okCount} 条，释放 ${formatBytes(res.space_reclaimed || 0)}`;
+                if (remain > 0) summary += `；${remain} 条未能清理（可能正在使用中）`;
+                if (res.note) summary += `\n提示：${res.note}`;
+                finishLocalTask(TASK_KEY, summary.split("\n")[0], true);
+                toast(summary, res.note ? "err" : "ok", res.note ? 10000 : null);
+                await refreshBuildCache();
+                await refreshSummary();
+            } catch (e) {
+                finishLocalTask(TASK_KEY, `清理失败：${e.message}`, false);
+                toast(`清理构建缓存失败：${e.message}`, "err", 8000);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = old; }
+            }
         }
         async function removeImage(imageId, label) {
             if (!confirm(`确认删除镜像 ${label}？\n如果该镜像正在被容器使用将无法删除。`)) return;
@@ -3252,6 +3492,31 @@
                 btnPruneUnused.dataset.bound = "1";
                 btnPruneUnused.addEventListener("click", pruneUnusedImages);
             }
+            const btnToggleBuildCache = $("#btnUpdToggleBuildCache");
+            if (btnToggleBuildCache && !btnToggleBuildCache.dataset.bound) {
+                btnToggleBuildCache.dataset.bound = "1";
+                btnToggleBuildCache.addEventListener("click", toggleBuildCacheDetail);
+            }
+            const chkBcAll = $("#updBcChkAll");
+            if (chkBcAll && !chkBcAll.dataset.bound) {
+                chkBcAll.dataset.bound = "1";
+                chkBcAll.addEventListener("change", (e) => {
+                    const entries = buildCacheEntries();
+                    if (e.target.checked) entries.forEach(en => updState.bcSelected.add(en.id));
+                    else updState.bcSelected.clear();
+                    renderBuildCacheDetail();
+                });
+            }
+            const btnPruneBuildCacheSel = $("#btnUpdPruneBuildCacheSel");
+            if (btnPruneBuildCacheSel && !btnPruneBuildCacheSel.dataset.bound) {
+                btnPruneBuildCacheSel.dataset.bound = "1";
+                btnPruneBuildCacheSel.addEventListener("click", pruneSelectedBuildCache);
+            }
+            const btnPruneBuildCache = $("#btnUpdPruneBuildCache");
+            if (btnPruneBuildCache && !btnPruneBuildCache.dataset.bound) {
+                btnPruneBuildCache.dataset.bound = "1";
+                btnPruneBuildCache.addEventListener("click", pruneBuildCache);
+            }
             const btnBatch = $("#btnUpdBatchUpdate");
             if (btnBatch && !btnBatch.dataset.bound) {
                 btnBatch.dataset.bound = "1";
@@ -3302,6 +3567,18 @@
             await refreshSummary();
         };
         window.__updPollLogs = pollLogs;
+
+        // 无感刷新最近拉取记录（供容器更新流程调用，不整体刷新页面）
+        window.__refreshPulls = async () => {
+            try {
+                if (window.__vueApp && typeof window.__vueApp.refreshPulls === "function") {
+                    await window.__vueApp.refreshPulls();
+                }
+            } catch (e) { /* 静默 */ }
+        };
+        async function refreshPullRecords() {
+            if (window.__refreshPulls) await window.__refreshPulls();
+        }
 
         waitForAppReady(() => {
             bindAll();

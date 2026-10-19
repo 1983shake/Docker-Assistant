@@ -298,6 +298,11 @@ async def get_pulls(limit: int = 500):
     return [p.model_dump(mode="json") for p in pulls]
 
 
+@router.get("/api/pulls/stats")
+async def get_pulls_stats():
+    return traffic_logger.get_pull_stats()
+
+
 @router.delete("/api/pulls")
 async def clear_pulls():
     traffic_logger.clear_pull_history()
@@ -535,8 +540,7 @@ async def api_check_one(name: str):
         raise HTTPException(status_code=409, detail=f"{name} 正在检测中")
 
     loop = asyncio.get_running_loop()
-    containers = await loop.run_in_executor(None, docker_service.list_containers)
-    target = next((c for c in containers if c["name"] == name), None)
+    target = await loop.run_in_executor(None, docker_service.get_container_info, name)
     if target is None:
         raise HTTPException(status_code=404, detail=f"未找到容器 {name}")
     if target.get("is_self"):
@@ -657,6 +661,35 @@ async def api_cleanup_mirror_tags():
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, updater_service.cleanup_mirror_tags)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/updater/images/build-cache")
+async def api_build_cache_info():
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, docker_service.get_build_cache_info)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/updater/images/prune-build-cache")
+async def api_prune_build_cache(request: Request):
+    ids = None
+    try:
+        data = await request.json()
+        if isinstance(data, dict):
+            raw = data.get("ids")
+            if isinstance(raw, list):
+                ids = [str(i).strip() for i in raw if str(i or "").strip()]
+    except Exception:
+        pass
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, lambda: docker_service.prune_build_cache(ids=ids))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

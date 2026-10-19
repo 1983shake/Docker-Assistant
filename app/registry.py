@@ -132,6 +132,23 @@ breaker = CircuitBreaker(threshold=3, cooldown=300)
 
 
 # ============================================================
+#  线程级 HTTP Session 复用
+#    get_remote_digest 在 executor 线程中被并发调用，
+#    按线程各持一个 requests.Session：既保留连接池 / keep-alive，
+#    又避免多线程共享 Session 的并发安全问题。
+# ============================================================
+_thread_local = threading.local()
+
+
+def _get_session() -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        _thread_local.session = s
+    return s
+
+
+# ============================================================
 #  Registry v2 查询
 # ============================================================
 
@@ -187,7 +204,7 @@ def get_remote_digest(image_ref, mirror=None, username=None, password=None, time
 
     for scheme in ("https", "http"):
         try:
-            session = requests.Session()
+            session = _get_session()
             headers = {"Accept": ACCEPT_HEADERS}
             auth = _fetch_auth(session, scheme, registry, repository, username, password)
             if auth:
