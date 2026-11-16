@@ -222,3 +222,7 @@ __marimo__/
 .workbuddy/
 data/
 config/config.yaml.bak
+
+# wordpress
+docs/screenshots_compressed/
+docs/wordpress/
