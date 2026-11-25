@@ -427,8 +427,8 @@ async def proxy_v2(path: str, request: Request) -> Response:
             r = None
             continue
 
-        if r.status_code == 401 and _is_blob_request:
-            reason = "HTTP 401 (blob auth failed)"
+        if r.status_code == 401 and (_is_blob_request or _is_manifest_request):
+            reason = "HTTP 401 (auth failed)"
             logger.warning(f"节点 {node.name} 返回 {reason}，切换下一个候选")
             attempts_log.append(f"{node.name}:HTTP 401")
             try:
@@ -476,8 +476,8 @@ async def proxy_v2(path: str, request: Request) -> Response:
                 continue
             r = new_r
 
-            if r.status_code == 401 and _is_blob_request:
-                reason = "HTTP 401 (blob auth failed, after redirect)"
+            if r.status_code == 401 and (_is_blob_request or _is_manifest_request):
+                reason = "HTTP 401 (auth failed, after redirect)"
                 logger.warning(f"节点 {node.name} 重定向后返回 {reason}，切换下一个候选")
                 attempts_log.append(f"{node.name}:HTTP 401")
                 try:

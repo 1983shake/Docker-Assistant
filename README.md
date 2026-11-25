@@ -118,7 +118,7 @@ mkdir -p /opt/docker-assistant && cd /opt/docker-assistant
 ```yaml
 services:
   docker-assistant:
-    image: docker.cnb.cool/1983shake/docker-assistant:latest
+    image: docker.cnb.cool/1983shake/docker-assistant:1.3.2
     container_name: docker-assistant
     restart: unless-stopped
     ports:
@@ -433,6 +433,7 @@ docker compose up -d
 
 | 版本    | 日期         | 概要                                   |
 | ----- | ---------- | ------------------------------------ |
+| 1.3.2 | 2026-11-25 | manifest 401 节点切换修复                     |
 | 1.3.1 | 2026-10-19 | 拉取统计无感刷新修复 · Docker 构建去依赖 CHANGELOG.md |
 | 1.3.0 | 2026-10-16 | 取消强制关闭 · 拉取记录无感刷新 · 构建缓存明细清理 · 全流程优化 |
 | 1.2.0 | 2026-10-05 | 架构精简 · 版本信息集中                        |

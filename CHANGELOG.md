@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > 测试版本记录：正式发版前的改动累积于此。发版时整段转为正式版本记录。
 
+## [1.3.2] - 2026-11-25
+
+manifest 401 节点切换修复
+
+- 修复：manifest 请求返回 401（token 换取失败）时未切换候选节点，被误判为成功并直接采用，导致容器更新取不到远程 digest、检查失败——将 401 纳入 manifest / blob 的鉴权失败切换逻辑（含重定向后场景），自动尝试下一节点
+- 改进：401 切换节点日志措辞统一为 `auth failed`，不再出现「响应 401，采用此节点」的误导记录
+
 ## [1.3.1] - 2026-10-19
 
 拉取统计无感刷新修复 · Docker 构建去依赖 CHANGELOG.md
